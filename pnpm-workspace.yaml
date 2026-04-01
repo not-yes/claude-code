@@ -1,3 +1,6 @@
+packages:
+  - "packages/**"
+  - "packages/@ant/*"
 onlyBuiltDependencies:
   - bun
   - esbuild

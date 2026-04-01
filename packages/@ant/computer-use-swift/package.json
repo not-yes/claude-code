@@ -1,0 +1,13 @@
+{
+  "name": "@ant/computer-use-swift",
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.30.3",
+  "description": "",
+  "author": "",
+  "license": "ISC",
+  "keywords": [],
+  "main": "js/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
