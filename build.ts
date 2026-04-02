@@ -14,6 +14,7 @@ const result = await Bun.build({
   target: 'node',
   format: 'esm',
   minify: true,
+  // compile: true,
   define: {
     'MACRO.VERSION': `"${version}"`,
     'MACRO.BUILD_TIME': `"${new Date().toISOString()}"`,

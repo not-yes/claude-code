@@ -143,6 +143,9 @@
     "packages/@ant/computer-use-mcp": {
       "name": "@ant/computer-use-mcp",
       "version": "1.0.0",
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.29.0",
+      },
     },
     "packages/@ant/computer-use-swift": {
       "name": "@ant/computer-use-swift",
