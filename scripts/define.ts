@@ -10,4 +10,5 @@ export const define = {
   'MACRO.VERSION_CHANGELOG': JSON.stringify(''),
   //
   'MACRO.USER_TYPE': JSON.stringify('ant'),
+  'BUILD_ENV': JSON.stringify('production'),
 };
