@@ -29,7 +29,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "build": "bun run build.ts",
+    "dev": "bun scripts/dev.ts",
+    "build": "bun scripts/build.ts",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
     "test": "vitest run --passWithNoTests --coverage",

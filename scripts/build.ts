@@ -1,6 +1,6 @@
 import { rm } from 'node:fs/promises';
 
-import { version } from './package.json';
+import { define } from './define';
 
 const outdir = 'dist';
 
@@ -15,14 +15,7 @@ const result = await Bun.build({
   format: 'esm',
   minify: true,
   // compile: true,
-  define: {
-    'MACRO.VERSION': `"${version}"`,
-    'MACRO.BUILD_TIME': `"${new Date().toISOString()}"`,
-    'MACRO.ISSUES_EXPLAINER': '"report the issue at https://github.com/sobird/claude-code/issues"',
-    'MACRO.FEEDBACK_CHANNEL': '"https://github.com/sobird/claude-code/issues"',
-    'MACRO.PACKAGE_URL': '"@sobird/claude-code"',
-    'MACRO.README_URL': '"https://code.claude.com/docs/en/overview"',
-  },
+  define,
 });
 
 if (!result.success) {
