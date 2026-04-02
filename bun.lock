@@ -113,6 +113,7 @@
         "@types/proper-lockfile": "^4.1.4",
         "@types/react": "^19.2.14",
         "@types/react-reconciler": "^0.33.0",
+        "@types/semver": "^7.7.1",
         "@types/turndown": "^5.0.6",
         "@types/ws": "^8.18.1",
         "@vitest/coverage-v8": "4.1.0",
@@ -858,6 +859,8 @@
     "@types/react-reconciler": ["@types/react-reconciler@0.33.0", "https://registry.npmmirror.com/@types/react-reconciler/-/react-reconciler-0.33.0.tgz", { "peerDependencies": { "@types/react": "*" } }, "sha512-HZOXsKT0tGI9LlUw2LuedXsVeB88wFa536vVL0M6vE8zN63nI+sSr1ByxmPToP5K5bukaVscyeCJcF9guVNJ1g=="],
 
     "@types/retry": ["@types/retry@0.12.5", "https://registry.npmmirror.com/@types/retry/-/retry-0.12.5.tgz", {}, "sha512-3xSjTp3v03X/lSQLkczaN9UIEwJMoMCA1+Nb5HfbJEQWogdeQIyVtTvxPXDQjZ5zws8rFQfVfRdz03ARihPJgw=="],
+
+    "@types/semver": ["@types/semver@7.7.1", "https://registry.npmmirror.com/@types/semver/-/semver-7.7.1.tgz", {}, "sha512-FmgJfu+MOcQ370SD0ev7EI8TlCAfKYU+B4m5T3yXc1CiRN94g/SZPtsCkk506aUDtlMnFZvasDwHHUcZUEaYuA=="],
 
     "@types/turndown": ["@types/turndown@5.0.6", "https://registry.npmmirror.com/@types/turndown/-/turndown-5.0.6.tgz", {}, "sha512-ru00MoyeeouE5BX4gRL+6m/BsDfbRayOskWqUvh7CLGW+UXxHQItqALa38kKnOiZPqJrtzJUgAC2+F0rL1S4Pg=="],
 

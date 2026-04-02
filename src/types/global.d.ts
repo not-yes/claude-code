@@ -93,5 +93,9 @@ declare module '*.css' {
 declare namespace NodeJS {
   interface ProcessEnv {
     AUDIO_CAPTURE_NODE_PATH?: string;
+    CLAUDE_CODE_TASK_LIST_ID: string;
+    USER_TYPE?: string;
+    CLAUDE_CODE_PERFETTO_TRACE?: string;
+    OTEL_LOG_TOOL_CONTENT?: string;
   }
 }
