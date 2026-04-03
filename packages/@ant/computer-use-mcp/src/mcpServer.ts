@@ -31,11 +31,11 @@ import type {
   CuPermissionResponse,
 } from './types.js';
 
-import { Server } from '@modelcontextprotocol/sdk/server';
+import { Server } from '@modelcontextprotocol/sdk/server.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types';
+} from '@modelcontextprotocol/sdk/types.js';
 
 import {
   defersLockAcquire,

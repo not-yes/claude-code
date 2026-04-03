@@ -8,7 +8,10 @@
  * 仅 macOS 支持。其他平台返回 { isSupported: false }
  */
 
-import { $ } from 'bun';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execAsync = promisify(exec);
 
 interface FrontmostAppInfo {
   bundleId: string;
@@ -60,13 +63,33 @@ const MODIFIER_MAP: Record<string, string> = {
 };
 
 async function osascript(script: string): Promise<string> {
-  const result = await $`osascript -e ${script}`.quiet().nothrow().text();
-  return result.trim();
+  try {
+    // 使用 -e 参数执行 osascript
+    const { stdout, stderr } = await execAsync(`osascript -e ${JSON.stringify(script)}`);
+
+    if (stderr && !stdout) {
+      // 如果有错误输出且没有标准输出，可以根据需要处理
+      return '';
+    }
+
+    return stdout.trim();
+  } catch (error) {
+    // 对应 Bun 的 .nothrow()，捕获异常并不抛出
+    return '';
+  }
 }
 
 async function jxa(script: string): Promise<string> {
-  const result = await $`osascript -l JavaScript -e ${script}`.quiet().nothrow().text();
-  return result.trim();
+  try {
+    // 关键点：使用 JSON.stringify 处理 script，防止 shell 报错
+    const command = `osascript -l JavaScript -e ${JSON.stringify(script)}`;
+
+    const { stdout } = await execAsync(command);
+    return stdout.trim();
+  } catch (error) {
+    // 模拟 Bun 的 .nothrow()，出错时返回空字符串
+    return '';
+  }
 }
 
 function jxaSync(script: string): string {

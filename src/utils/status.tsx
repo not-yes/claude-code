@@ -26,7 +26,7 @@ export type Property = {
 };
 export type Diagnostic = React.ReactNode;
 export function buildSandboxProperties(): Property[] {
-  if ("external" !== 'ant') {
+  if (BUILD_TARGET !== 'ant') {
     return [];
   }
   const isSandboxed = SandboxManager.isSandboxingEnabled();
