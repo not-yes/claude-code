@@ -97,8 +97,8 @@ type BuildTarget = 'ant' | 'external';
 type BuildEnv = 'development' | 'production' | 'test';
 
 export function define(
-  buildEnv: BuildEnv = 'production',
   buildTraget: BuildTarget = 'external',
+  buildEnv: BuildEnv = 'production',
 ) {
   return {
     'MACRO.VERSION': JSON.stringify(version),
@@ -111,6 +111,8 @@ export function define(
     //
     'BUILD_TARGET': JSON.stringify(buildTraget), // external | ant
     'BUILD_ENV': JSON.stringify(buildEnv),
+    //
+    'process.env.USER_TYPE': JSON.stringify(buildTraget),
   };
 }
 

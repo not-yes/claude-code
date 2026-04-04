@@ -17,10 +17,21 @@
  *   is the same either way.
  */
 
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 
-import type { ScreenshotResult } from './executor.js';
-import type { CuCallToolResult } from './toolCalls.js';
+import type { ScreenshotResult } from "./executor.js";
+import type { CuCallToolResult } from "./toolCalls.js";
+import {
+  defersLockAcquire,
+  handleToolCall,
+  resetMouseButtonHeld,
+} from "./toolCalls.js";
+import { buildComputerUseTools } from "./tools.js";
 import type {
   AppGrant,
   ComputerUseHostAdapter,
@@ -29,24 +40,12 @@ import type {
   CoordinateMode,
   CuGrantFlags,
   CuPermissionResponse,
-} from './types.js';
+} from "./types.js";
+import { DEFAULT_GRANT_FLAGS } from "./types.js";
 
-import { Server } from '@modelcontextprotocol/sdk/server.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-
-import {
-  defersLockAcquire,
-  handleToolCall,
-  resetMouseButtonHeld,
-} from './toolCalls.js';
-import { buildComputerUseTools } from './tools.js';
-import { DEFAULT_GRANT_FLAGS } from './types.js';
-
-const DEFAULT_LOCK_HELD_MESSAGE = 'Another Claude session is currently using the computer. Wait for that '
-  + 'session to finish, or find a non-computer-use approach.';
+const DEFAULT_LOCK_HELD_MESSAGE =
+  "Another Claude session is currently using the computer. Wait for that " +
+  "session to finish, or find a non-computer-use approach.";
 
 /**
  * Dedupe `granted` into `existing` on bundleId, spread truthy-only flags over
@@ -61,10 +60,10 @@ function mergePermissionResponse(
   existingFlags: CuGrantFlags,
   response: CuPermissionResponse,
 ): { apps: AppGrant[]; flags: CuGrantFlags } {
-  const seen = new Set(existing.map(a => a.bundleId));
+  const seen = new Set(existing.map((a) => a.bundleId));
   const apps = [
     ...existing,
-    ...response.granted.filter(g => !seen.has(g.bundleId)),
+    ...response.granted.filter((g) => !seen.has(g.bundleId)),
   ];
   const truthyFlags = Object.fromEntries(
     Object.entries(response.flags).filter(([, v]) => v === true),
@@ -100,44 +99,44 @@ export function bindSessionContext(
 
   const wrapPermission = ctx.onPermissionRequest
     ? async (
-      req: Parameters<NonNullable<typeof ctx.onPermissionRequest>>[0],
-      signal: AbortSignal,
-    ): Promise<CuPermissionResponse> => {
-      const response = await ctx.onPermissionRequest!(req, signal);
-      const { apps, flags } = mergePermissionResponse(
-        ctx.getAllowedApps(),
-        ctx.getGrantFlags(),
-        response,
-      );
-      logger.debug(
+        req: Parameters<NonNullable<typeof ctx.onPermissionRequest>>[0],
+        signal: AbortSignal,
+      ): Promise<CuPermissionResponse> => {
+        const response = await ctx.onPermissionRequest!(req, signal);
+        const { apps, flags } = mergePermissionResponse(
+          ctx.getAllowedApps(),
+          ctx.getGrantFlags(),
+          response,
+        );
+        logger.debug(
           `[${serverName}] permission result: granted=${response.granted.length} denied=${response.denied.length}`,
-      );
-      ctx.onAllowedAppsChanged?.(apps, flags);
-      return response;
-    }
+        );
+        ctx.onAllowedAppsChanged?.(apps, flags);
+        return response;
+      }
     : undefined;
 
   const wrapTeachPermission = ctx.onTeachPermissionRequest
     ? async (
-      req: Parameters<NonNullable<typeof ctx.onTeachPermissionRequest>>[0],
-      signal: AbortSignal,
-    ): Promise<CuPermissionResponse> => {
-      const response = await ctx.onTeachPermissionRequest!(req, signal);
-      logger.debug(
+        req: Parameters<NonNullable<typeof ctx.onTeachPermissionRequest>>[0],
+        signal: AbortSignal,
+      ): Promise<CuPermissionResponse> => {
+        const response = await ctx.onTeachPermissionRequest!(req, signal);
+        logger.debug(
           `[${serverName}] teach permission result: granted=${response.granted.length} denied=${response.denied.length}`,
-      );
-      // Teach doesn't request grant flags — preserve existing.
-      const { apps } = mergePermissionResponse(
-        ctx.getAllowedApps(),
-        ctx.getGrantFlags(),
-        response,
-      );
-      ctx.onAllowedAppsChanged?.(apps, {
-        ...DEFAULT_GRANT_FLAGS,
-        ...ctx.getGrantFlags(),
-      });
-      return response;
-    }
+        );
+        // Teach doesn't request grant flags — preserve existing.
+        const { apps } = mergePermissionResponse(
+          ctx.getAllowedApps(),
+          ctx.getGrantFlags(),
+          response,
+        );
+        ctx.onAllowedAppsChanged?.(apps, {
+          ...DEFAULT_GRANT_FLAGS,
+          ...ctx.getGrantFlags(),
+        });
+        return response;
+      }
     : undefined;
 
   return async (name, args) => {
@@ -149,11 +148,12 @@ export function bindSessionContext(
     if (ctx.checkCuLock) {
       const lock = await ctx.checkCuLock();
       if (lock.holder !== undefined && !lock.isSelf) {
-        const text = ctx.formatLockHeldMessage?.(lock.holder) ?? DEFAULT_LOCK_HELD_MESSAGE;
+        const text =
+          ctx.formatLockHeldMessage?.(lock.holder) ?? DEFAULT_LOCK_HELD_MESSAGE;
         return {
-          content: [{ type: 'text', text }],
+          content: [{ type: "text", text }],
           isError: true,
-          telemetry: { error_kind: 'cu_lock_held' },
+          telemetry: { error_kind: "cu_lock_held" },
         };
       }
       if (lock.holder === undefined && !defersLockAcquire(name)) {
@@ -167,12 +167,13 @@ export function bindSessionContext(
         // path too.
         const recheck = await ctx.checkCuLock();
         if (recheck.holder !== undefined && !recheck.isSelf) {
-          const text = ctx.formatLockHeldMessage?.(recheck.holder)
-            ?? DEFAULT_LOCK_HELD_MESSAGE;
+          const text =
+            ctx.formatLockHeldMessage?.(recheck.holder) ??
+            DEFAULT_LOCK_HELD_MESSAGE;
           return {
-            content: [{ type: 'text', text }],
+            content: [{ type: "text", text }],
             isError: true,
-            telemetry: { error_kind: 'cu_lock_held' },
+            telemetry: { error_kind: "cu_lock_held" },
           };
         }
         // Fresh holder → any prior session's mouseButtonHeld is stale.
@@ -204,13 +205,13 @@ export function bindSessionContext(
       displayPinnedByModel: ctx.getDisplayPinnedByModel?.(),
       displayResolvedForApps: ctx.getDisplayResolvedForApps?.(),
       lastScreenshot:
-        lastScreenshot
-        ?? (dimsFallback ? { ...dimsFallback, base64: '' } : undefined),
+        lastScreenshot ??
+        (dimsFallback ? { ...dimsFallback, base64: "" } : undefined),
       onPermissionRequest: wrapPermission
-        ? async req => wrapPermission(req, dialogAbort.signal)
+        ? (req) => wrapPermission(req, dialogAbort.signal)
         : undefined,
       onTeachPermissionRequest: wrapTeachPermission
-        ? async req => wrapTeachPermission(req, dialogAbort.signal)
+        ? (req) => wrapTeachPermission(req, dialogAbort.signal)
         : undefined,
       onAppsHidden: ctx.onAppsHidden,
       getClipboardStash: ctx.getClipboardStash,
@@ -259,7 +260,7 @@ export function createComputerUseMcpServer(
   const { serverName, logger } = adapter;
 
   const server = new Server(
-    { name: serverName, version: '0.1.3' },
+    { name: serverName, version: "0.1.3" },
     { capabilities: { tools: {}, logging: {} } },
   );
 
@@ -268,7 +269,9 @@ export function createComputerUseMcpServer(
     coordinateMode,
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, () => (adapter.isDisabled() ? { tools: [] } : { tools }));
+  server.setRequestHandler(ListToolsRequestSchema, async () =>
+    adapter.isDisabled() ? { tools: [] } : { tools },
+  );
 
   if (context) {
     const dispatch = bindSessionContext(adapter, coordinateMode, context);
@@ -297,8 +300,8 @@ export function createComputerUseMcpServer(
       return {
         content: [
           {
-            type: 'text',
-            text: 'This computer-use server instance is not wired to a session. Per-session app permissions are not available on this code path.',
+            type: "text",
+            text: "This computer-use server instance is not wired to a session. Per-session app permissions are not available on this code path.",
           },
         ],
         isError: true,
