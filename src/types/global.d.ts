@@ -63,13 +63,6 @@ declare type T = unknown
 declare function TungstenPill(props?: { key?: string; selected?: boolean }): JSX.Element | null
 
 // ============================================================================
-// Build-time constants — replaced by Bun bundler, polyfilled at runtime
-// Using `string` (not literal types) so comparisons don't produce TS2367
-declare const BUILD_TARGET: string
-declare const BUILD_ENV: string
-declare const INTERFACE_TYPE: string
-
-// ============================================================================
 // Ink custom JSX intrinsic elements — see src/types/ink-jsx.d.ts
 
 // ============================================================================

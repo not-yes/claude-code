@@ -441,3 +441,6 @@ export async function connectRemoteControl(
 ): Promise<RemoteControlHandle | null> {
   throw new Error('not implemented')
 }
+
+export type HookEvent = string;
+export type ExitReason = string;
