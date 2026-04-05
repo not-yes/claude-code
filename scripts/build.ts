@@ -4,9 +4,8 @@ import {
   banner, define, external, features,
 } from './config';
 
-const outdir = 'dist';
-
 const isDevelopment = process.env.NODE_ENV === 'development';
+const outdir = 'dist';
 
 // Clean output directory
 await rm(outdir, { recursive: true, force: true });

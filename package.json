@@ -16,15 +16,10 @@
   "keywords": [
     "typescript"
   ],
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "bin": {
     "sobird": "dist/cli.js"
   },
-  "files": [
-    "dist"
-  ],
+  "files": [],
   "engines": {
     "node": ">=18.0.0"
   },
@@ -38,7 +33,7 @@
     "setup": "bun install --ignore-scripts",
     "postinstall": "echo \"postinstall\"",
     "prepare": "husky",
-    "prepublishOnly": "bun scripts/prepublishOnly.ts"
+    "prepublishOnly": "bun run build && bun scripts/prepublishOnly.ts"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",

@@ -1,23 +1,18 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { rename, writeFile } from 'node:fs/promises';
 
 import pkg from '../package.json';
 import { external } from './config';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+await rename('dist/cli.js', 'cli.js');
+pkg.bin.sobird = 'cli.js';
 
-const pkgPath = path.join(__dirname, '../package.json');
-
-// 修改 bin 字段
-pkg.bin.sobird = 'dist/cli.js';
-
-// @ts-expect-error: 正常
+// @ts-expect-error: reset
 const dependencies = Object.fromEntries(external.map(dep => [dep, pkg.dependencies[dep]]));
-// @ts-expect-error: 正常
+// @ts-expect-error: reset
 pkg.dependencies = dependencies;
-// @ts-expect-error: 正常
-pkg.devDependencies = {};
+// @ts-expect-error: reset
+pkg.devDependencies = undefined;
+// @ts-expect-error: reset
+pkg.workspaces = undefined;
 
-fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+await writeFile('package.json', JSON.stringify(pkg, null, 2));

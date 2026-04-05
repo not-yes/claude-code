@@ -32,8 +32,5 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: npm run setup
 
-      - name: Build ☕️
-        run: npm run build
-
       - name: Publish to NPM
         run: npm -r publish --access public --no-git-checks
