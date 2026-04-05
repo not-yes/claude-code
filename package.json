@@ -37,7 +37,8 @@
     "typecheck": "tsc --noEmit",
     "setup": "bun install --ignore-scripts",
     "postinstall": "echo \"postinstall\"",
-    "prepare": "husky"
+    "prepare": "husky",
+    "prepublishOnly": "bun scripts/prepublishOnly.ts"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",

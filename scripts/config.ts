@@ -1,6 +1,6 @@
 import { bugs, name, version } from '../package.json';
 
-export const FEATURES = [
+export const features = [
   // 'ABLATION_BASELINE',
   // 'AGENT_MEMORY_SNAPSHOT',
   // 'AGENT_TRIGGERS',
@@ -114,10 +114,12 @@ export function define(
   };
 }
 
-export const BANNER = `#!/usr/bin/env node
+export const banner = `#!/usr/bin/env node
 // (c) Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
 
 // Version: ${version}
 
 // Want to see the unminified source? We're hiring!
 // https://job-boards.greenhouse.io/anthropic/jobs/4816199008`;
+
+export const external = ['@vscode/ripgrep'];

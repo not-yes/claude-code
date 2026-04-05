@@ -28,4 +28,4 @@ async function extractFeatures() {
 const features = await extractFeatures();
 
 // eslint-disable-next-line no-console
-console.log('export const FEATURES =', JSON.stringify(features, null, 2));
+console.log('export const features =', JSON.stringify(features, null, 2));
