@@ -13,6 +13,7 @@ import { Tabs, Tab } from '../design-system/Tabs.js'
 import { Status, buildDiagnostics } from './Status.js'
 import { Config } from './Config.js'
 import { Usage } from './Usage.js'
+import { Gates } from './Gates.js'
 import type {
   LocalJSXCommandContext,
   CommandResultDisplay,
