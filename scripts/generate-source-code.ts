@@ -49,6 +49,9 @@ await SourceMapConsumer.with(rawSourceMap, null, (consumer) => {
       content = sourceMap.sourcesContent?.[0] ?? '';
 
       tsxFileCount += 1;
+
+      content = content.replaceAll('"external" ===', 'process.env.USER_TYPE ===');
+      content = content.replaceAll('"production" ===', 'process.env.NODE_ENV ===');
     }
 
     // 统计源码文件数和代码行数

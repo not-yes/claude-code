@@ -13,6 +13,7 @@ import { findExecutable } from './findExecutable.js'
 import { logError } from './log.js'
 import { getPlatform } from './platform.js'
 import { countCharInString } from './stringUtils.js'
+import { rgPath } from "@vscode/ripgrep";
 
 const __filename = fileURLToPath(import.meta.url)
 // we use node:path.join instead of node:url.resolve because the former doesn't encode spaces
@@ -55,13 +56,13 @@ const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-  const command =
-    process.platform === 'win32'
-      ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
-      : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
+  // const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
+  // const command =
+  //   process.platform === 'win32'
+  //     ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
+  //     : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
 
-  return { mode: 'builtin', command, args: [] }
+  return { mode: 'builtin', command: rgPath, args: [] }
 })
 
 export function ripgrepCommand(): {

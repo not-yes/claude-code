@@ -75,6 +75,7 @@
     "@opentelemetry/semantic-conventions": "^1.40.0",
     "@smithy/core": "^3.23.13",
     "@smithy/node-http-handler": "^4.5.1",
+    "@vscode/ripgrep": "^1.17.1",
     "ajv": "^8.17.1",
     "asciichart": "^1.5.25",
     "audio-capture-napi": "workspace:*",
