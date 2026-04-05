@@ -24,6 +24,10 @@ npm install -g @anthropic-ai/claude-code
 
 2. Navigate to your project directory and run `claude`.
 
+## Configuration
+
+For detailed information about environment variables and configuration options, see our [Environment Variables Documentation](docs/environment-variables.md).
+
 ## Reporting Bugs
 
 We welcome your feedback. Use the `/bug` command to report issues directly within Claude Code, or file a [GitHub issue](https://github.com/anthropics/claude-code/issues).
