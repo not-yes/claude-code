@@ -1,4 +1,7 @@
+import type { BuildTarget } from './config';
+
 import { rm } from 'node:fs/promises';
+import { parseArgs } from 'node:util';
 
 import {
   banner, define, external, features,
@@ -10,6 +13,17 @@ const outdir = 'dist';
 // Clean output directory
 await rm(outdir, { recursive: true, force: true });
 
+const { values } = parseArgs({
+  args: Bun.argv,
+  options: {
+    ant: { type: 'boolean', default: false },
+  },
+  strict: false,
+  allowPositionals: true,
+});
+
+const buildTraget: BuildTarget = Boolean(values.ant) ? 'ant' : 'external';
+
 // Bundle
 const result = await Bun.build({
   entrypoints: ['src/entrypoints/cli.tsx'],
@@ -18,7 +32,7 @@ const result = await Bun.build({
   format: 'esm',
   minify: !isDevelopment,
   // compile: true,
-  define: define(),
+  define: define(buildTraget),
   features,
   banner,
   external,

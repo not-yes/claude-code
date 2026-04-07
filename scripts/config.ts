@@ -93,28 +93,31 @@ export const features = [
   // 'WORKFLOW_SCRIPTS',
 ];
 
-type BuildTarget = 'ant' | 'external';
-type BuildEnv = 'development' | 'production' | 'test';
+export const defines = {
+  'MACRO.VERSION': JSON.stringify(version),
+  'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
+  'MACRO.FEEDBACK_CHANNEL': JSON.stringify(bugs.url),
+  'MACRO.ISSUES_EXPLAINER': JSON.stringify(`report the issue at ${bugs.url}`),
+  'MACRO.NATIVE_PACKAGE_URL': JSON.stringify(name),
+  'MACRO.PACKAGE_URL': JSON.stringify(name),
+  'MACRO.VERSION_CHANGELOG': JSON.stringify(''),
+};
+
+export type BuildTarget = 'ant' | 'external';
+export type BuildEnv = 'development' | 'production' | 'test';
 
 export function define(
   buildTraget: BuildTarget = 'external',
   buildEnv: BuildEnv = 'production',
 ) {
   return {
-    'MACRO.VERSION': JSON.stringify(version),
-    'MACRO.BUILD_TIME': JSON.stringify(new Date().toISOString()),
-    'MACRO.FEEDBACK_CHANNEL': JSON.stringify(bugs.url),
-    'MACRO.ISSUES_EXPLAINER': JSON.stringify(`report the issue at ${bugs.url}`),
-    'MACRO.NATIVE_PACKAGE_URL': JSON.stringify(name),
-    'MACRO.PACKAGE_URL': JSON.stringify(name),
-    'MACRO.VERSION_CHANGELOG': JSON.stringify(''),
-    // 测试使用.env中
-    // 'process.env.NODE_ENV': JSON.stringify(buildEnv),
-    // 'process.env.USER_TYPE': JSON.stringify(buildTraget),
+    ...defines,
+    'process.env.NODE_ENV': JSON.stringify(buildEnv),
+    'process.env.USER_TYPE': JSON.stringify(buildTraget),
   };
 }
 
-export const defineArgs = Object.entries(define()).flatMap(([k, v]) => ['-d', `${k}:${v}`]);
+export const defineArgs = Object.entries(defines).flatMap(([k, v]) => ['-d', `${k}:${v}`]);
 
 export const banner = `#!/usr/bin/env node
 // (c) Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
