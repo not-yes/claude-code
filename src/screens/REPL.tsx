@@ -191,6 +191,10 @@ import { isHumanTurn } from '../utils/messagePredicates.js'
 import { logError } from '../utils/log.js'
 // Dead code elimination: conditional imports
 /* eslint-disable custom-rules/no-process-env-top-level, @typescript-eslint/no-require-imports */
+const launchUltraplan: typeof import('../commands/ultraplan.js').launchUltraplan =
+  feature('ULTRAPLAN')
+    ? require('../commands/ultraplan.js').launchUltraplan
+    : () => {}
 const useVoiceIntegration: typeof import('../hooks/useVoiceIntegration.js').useVoiceIntegration =
   feature('VOICE_MODE')
     ? require('../hooks/useVoiceIntegration.js').useVoiceIntegration

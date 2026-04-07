@@ -43,6 +43,7 @@ import { useAppStateStore } from '../../state/AppState.js'
 import { isBackgroundTask, type TaskState } from '../../tasks/types.js'
 import { getPillLabel } from '../../tasks/pillLabel.js'
 import { useSelectedMessageBg } from '../messageActions.js'
+import { HOOK_TIMING_DISPLAY_THRESHOLD_MS } from 'src/services/tools/toolExecution.js'
 
 type Props = {
   message: SystemMessage
