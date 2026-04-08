@@ -100,7 +100,36 @@ async function ensureSkillsDir(): Promise<void> {
 }
 
 /**
- * 读取所有技能配置（扫描 skills 目录中的 JSON 文件）
+ * 解析 YAML frontmatter (---...--- 格式)
+ */
+function parseFrontmatter(content: string): { data: Record<string, any>; body: string } {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
+  if (!match) {
+    return { data: {}, body: content }
+  }
+  // 简单的 YAML 解析（处理简单字段）
+  const yamlStr = match[1]
+  const body = match[2]
+  const data: Record<string, any> = {}
+
+  for (const line of yamlStr.split('\n')) {
+    const colonIdx = line.indexOf(':')
+    if (colonIdx > 0) {
+      const key = line.slice(0, colonIdx).trim()
+      let value = line.slice(colonIdx + 1).trim()
+      // 去除引号
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1)
+      }
+      data[key] = value
+    }
+  }
+
+  return { data, body }
+}
+
+/**
+ * 读取所有技能配置（扫描 skills 目录中的 JSON 文件和 SKILL.md 目录）
  */
 async function readAllSkills(): Promise<Skill[]> {
   try {
@@ -109,13 +138,57 @@ async function readAllSkills(): Promise<Skill[]> {
     const skills: Skill[] = []
 
     for (const entry of entries) {
+      const entryPath = join(SKILLS_DIR, entry.name)
+
       if (entry.isFile() && entry.name.endsWith('.json')) {
+        // JSON 格式技能
         try {
-          const content = await fs.readFile(join(SKILLS_DIR, entry.name), 'utf-8')
+          const content = await fs.readFile(entryPath, 'utf-8')
           const skill = JSON.parse(content) as Skill
           skills.push(skill)
         } catch {
           // 单个文件读取失败不中断整体
+        }
+      } else if (entry.isDirectory()) {
+        // 目录格式技能（SKILL.md）
+        const skillMdPath = join(entryPath, 'SKILL.md')
+        try {
+          const content = await fs.readFile(skillMdPath, 'utf-8')
+          const { data } = parseFrontmatter(content)
+
+          // 读取 guidance 内容（SKILL.md 的 body）
+          const guidanceMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/)
+          const guidance = guidanceMatch ? guidanceMatch[1].trim() : ''
+
+          // 解析 trigger_patterns（可能是正则字符串）
+          let triggerPatterns: string[] = []
+          if (data.trigger_patterns) {
+            if (typeof data.trigger_patterns === 'string') {
+              // 可能是 | 分行的字符串
+              triggerPatterns = data.trigger_patterns.split('|').map((p: string) => p.trim()).filter(Boolean)
+            } else if (Array.isArray(data.trigger_patterns)) {
+              triggerPatterns = data.trigger_patterns
+            }
+          }
+
+          const skill: Skill = {
+            id: entry.name, // 使用目录名作为 ID
+            name: data.name || entry.name,
+            description: data.description || '',
+            category: data.category || '',
+            version: data.version || '1.0.0',
+            guidance: guidance,
+            trigger_patterns: triggerPatterns,
+            suggested_tools: Array.isArray(data.tool_whitelist) ? data.tool_whitelist : [],
+            source: 'local',
+            file_path: skillMdPath,
+            installed: true,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }
+          skills.push(skill)
+        } catch {
+          // 目录中无 SKILL.md 或读取失败，跳过
         }
       }
     }

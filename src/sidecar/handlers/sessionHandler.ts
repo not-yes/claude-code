@@ -58,6 +58,24 @@ interface DeleteSessionResult {
 }
 
 interface StatsResult {
+  // 任务执行统计
+  total_calls: number
+  success_count: number
+  failure_count: number
+  success_rate: number
+  average_duration_ms: number
+  // LLM 统计
+  llm_calls: number
+  llm_tokens: number
+  llm_cost_usd: number
+  llm_avg_cost: number
+  // 工具统计
+  tool_calls: number
+  tool_success_count: number
+  tool_failure_count: number
+  tool_avg_duration_ms: number
+  tool_cost_usd: number
+  // 服务器状态
   totalSessions: number
   activeSession: boolean
   uptime: number
@@ -183,7 +201,32 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
       const state = agentCore.getState()
       const uptime = Date.now() - server.startTime
 
+      // 计算 LLM 统计
+      const totalTokens = state.usage.inputTokens + state.usage.outputTokens
+      const llm_cost_usd = state.totalCostUsd
+      // 假设每次执行是一次 LLM 调用
+      const llm_calls = sessions.length > 0 ? sessions.length : 1
+      const llm_avg_cost = llm_calls > 0 ? llm_cost_usd / llm_calls : 0
+
       return {
+        // 任务执行统计（暂用会话数作为调用数）
+        total_calls: sessions.length,
+        success_count: state.sessionId !== '' ? sessions.length : 0,
+        failure_count: 0,
+        success_rate: sessions.length > 0 ? 100 : 0,
+        average_duration_ms: uptime / Math.max(sessions.length, 1),
+        // LLM 统计
+        llm_calls,
+        llm_tokens: totalTokens,
+        llm_cost_usd,
+        llm_avg_cost,
+        // 工具统计（暂用默认值）
+        tool_calls: 0,
+        tool_success_count: 0,
+        tool_failure_count: 0,
+        tool_avg_duration_ms: 0,
+        tool_cost_usd: 0,
+        // 服务器状态
         totalSessions: sessions.length,
         activeSession: state.sessionId !== '',
         uptime,

@@ -15,10 +15,33 @@
  *   SIDECAR_MODE=true bun run src/sidecar/entry.ts
  */
 
+// ─── MACRO 垫片 ────────────────────────────────────────────────────────────────
+// MACRO 是 bun:bundle 的编译时宏，在 sidecar 编译时需要提供垫片
+// @ts-ignore - 全局声明
+globalThis.MACRO = globalThis.MACRO ?? {
+  VERSION: '0.0.0',
+  BUILD_TIME: '0',
+  FEEDBACK_CHANNEL: '',
+  ISSUES_EXPLAINER: '',
+  NATIVE_PACKAGE_URL: '',
+  PACKAGE_URL: '',
+  VERSION_CHANGELOG: '',
+  USER_TYPE: '',
+}
+
+// ─── bun:bundle feature 垫片 ────────────────────────────────────────────────────
+// feature() 是 bun:bundle 的条件编译函数
+// @ts-ignore - 全局声明
+globalThis.feature = globalThis.feature ?? ((name: string) => {
+  // sidecar 模式禁用所有特性
+  return false
+})
+
 import { createAgentCore } from '../core/AgentCore'
 import { JsonRpcServer } from './jsonRpcServer'
 import { SessionStorage } from './storage/sessionStorage'
 import type { AgentCoreConfig } from '../core/types'
+import { enableConfigs } from '../utils/config.js'
 
 // ─── 日志工具（发往 stderr，不干扰 stdout 协议）─────────────────────────────────
 
@@ -99,6 +122,10 @@ async function main(): Promise<void> {
   log('INFO', `工作目录: ${agentConfig.cwd}`)
   log('INFO', `权限模式: ${agentConfig.defaultPermissionMode}`)
   log('INFO', `调试日志: ${debug}`)
+
+  // 启用配置读取（必须在 AgentCore 初始化之前）
+  enableConfigs()
+  log('INFO', '配置系统已启用')
 
   // 2. 初始化 SessionStorage
   let sessionStorage: SessionStorage | undefined
