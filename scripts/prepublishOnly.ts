@@ -4,7 +4,7 @@ import pkg from '../package.json';
 import { external } from './config';
 
 await rename('dist/cli.js', 'cli.js');
-pkg.bin.sobird = 'cli.js';
+pkg.bin.claude = 'cli.js';
 
 // @ts-expect-error: reset
 const dependencies = Object.fromEntries(external.map(dep => [dep, pkg.dependencies[dep]]));

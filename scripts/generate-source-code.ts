@@ -10,7 +10,7 @@
  * bun run scripts/generate-source-code.ts
  * ```
  *
- * sobird<i@sobird.me> at 2026/04/01 4:45:05 created.
+ * wangke at 2026/04/01 4:45:05 created.
  */
 
 import type { RawSourceMap } from 'source-map';
