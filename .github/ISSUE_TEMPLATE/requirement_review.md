@@ -6,7 +6,7 @@ labels:
   - requirement-review
   - planning
 assignees:
-  - sobird
+  - wangke
 ---
 
 ## Requirement Summary
