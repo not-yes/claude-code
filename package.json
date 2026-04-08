@@ -1,23 +1,16 @@
 {
-  "name": "@sobird/claude-code",
+  "name": "claude-desktop",
   "type": "module",
   "version": "2.1.88",
+  "private": true,
   "description": "Use Claude, Anthropic's AI assistant, right from your terminal. Claude can understand your codebase, edit files, run terminal commands, and handle entire workflows for you.",
-  "author": "sobird",
-  "license": "MIT",
-  "homepage": "https://github.com/sobird/claude-code",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/sobird/claude-code.git"
-  },
-  "bugs": {
-    "url": "https://github.com/sobird/claude-code/issues"
-  },
+  "author": "wangke",
+  "license": "UNLICENSED",
   "keywords": [
     "typescript"
   ],
   "bin": {
-    "sobird": "dist/cli.js"
+    "claude": "dist/cli.js"
   },
   "files": [],
   "engines": {
@@ -35,7 +28,9 @@
     "setup": "bun install --ignore-scripts",
     "postinstall": "echo \"postinstall\"",
     "prepare": "husky",
-    "prepublishOnly": "bun run build && bun scripts/prepublishOnly.ts"
+    "prepublishOnly": "bun run build && bun scripts/prepublishOnly.ts",
+    "build:sidecar": "bun scripts/build-sidecar.ts",
+    "build:sidecar:all": "bun scripts/build-sidecar.ts --target bun-darwin-arm64 && bun scripts/build-sidecar.ts --target bun-darwin-x64 && bun scripts/build-sidecar.ts --target bun-linux-x64 && bun scripts/build-sidecar.ts --target bun-windows-x64"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "^0.3.0",
@@ -153,14 +148,17 @@
     "@types/ws": "^8.18.1",
     "bun": "^1.3.11",
     "eslint": "^9.39.4",
-    "eslint-config-sobird": "^1.1.1",
+    "@eslint/js": "^9.39.4",
+    "typescript-eslint": "^8.56.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-n": "^17.24.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "source-map": "^0.7.6",
     "typescript": "^6.0.2"
   },
   "lint-staged": {
-    "*": "eslint --fix"
+    "*.{ts,tsx}": "eslint --fix --quiet"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
