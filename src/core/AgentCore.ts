@@ -249,7 +249,7 @@ class AgentCoreImpl implements AgentCore {
 
     // 初始化 StateManager 的工作目录
     const { cwd } = this.config
-    this.deps.stateManager.setState(prev => ({
+    this.deps.stateManager.setState((prev: CoreState) => ({
       ...prev,
       cwd,
       permissionMode: this.config.defaultPermissionMode ?? 'interactive',
@@ -402,7 +402,7 @@ class AgentCoreImpl implements AgentCore {
 
     // 更新工作目录（如果提供）
     if (params?.cwd) {
-      this.deps.stateManager.setState(prev => ({
+      this.deps.stateManager.setState((prev: CoreState) => ({
         ...prev,
         cwd: params.cwd!,
       }))
@@ -493,7 +493,7 @@ class AgentCoreImpl implements AgentCore {
     // 清空 StateManager 中缓存的消息（QueryEngine 内部 mutableMessages 在下次 execute 重新创建）
     // 对应 REPL 中的 /clear 命令 → regenerateSessionId() + 清空消息数组
     const { randomUUID } = await import('crypto')
-    this.deps.stateManager.setState(prev => ({
+    this.deps.stateManager.setState((prev: CoreState) => ({
       ...prev,
       sessionId: randomUUID(),
     }))
@@ -507,7 +507,8 @@ class AgentCoreImpl implements AgentCore {
   // ─── 工具管理 ──────────────────────────────────────────────────────────
 
   listTools(): ToolInfo[] {
-    return this.deps.toolRegistry.list().map(tool => ({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return this.deps.toolRegistry.list().map((tool: any) => ({
       name: tool.name,
       description: '',  // Tool.prompt() 是 async 的，此处返回空字符串
       isReadOnly: tool.isReadOnly({}),
@@ -548,7 +549,7 @@ class AgentCoreImpl implements AgentCore {
     // 返回符合 CanUseToolFn 签名的函数
     // 类型使用 any 避免循环引用（CanUseToolFn 引用了 Tool/ToolUseContext 等内部类型）
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return async (tool: any, input: any, context: any): Promise<any> => {
+    return async (tool: any, input: any, _context: any): Promise<any> => {
       const toolName: string = tool.name
       const currentState = this.deps.stateManager.getState()
       const permMode = currentState.permissionMode

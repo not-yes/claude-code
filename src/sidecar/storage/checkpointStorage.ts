@@ -7,7 +7,7 @@
  * 本类提供统计、清理等辅助功能，不重复实现 CRUD 逻辑。
  *
  * 存储路径（与 checkpointHandler.ts 保持一致）：
- *   ~/.claude-desktop/checkpoints/{sessionId}/{checkpointId}.json
+ *   ~/.claude/checkpoints/{sessionId}/{checkpointId}.json
  */
 
 import { homedir } from 'os'
@@ -17,7 +17,7 @@ import { existsSync } from 'fs'
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────────
 
-const CHECKPOINT_BASE_DIR = join(homedir(), '.claude-desktop', 'checkpoints')
+const CHECKPOINT_BASE_DIR = join(homedir(), '.claude', 'checkpoints')
 
 // ─── CheckpointStorage 实现 ────────────────────────────────────────────────────
 

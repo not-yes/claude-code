@@ -1,5 +1,5 @@
 /**
- * @sobird/claude-code
+ * claude-desktop
  *
  * A pristine TypeScript template for rapid project inception.
  */

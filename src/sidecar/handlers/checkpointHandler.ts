@@ -4,7 +4,7 @@
  * Checkpoint API handler 注册模块。
  *
  * Checkpoint 是会话执行过程中的快照点，用于回滚和对比。
- * 使用文件系统持久化存储：~/.claude-desktop/checkpoints/{sessionId}/{checkpointId}.json
+ * 使用文件系统持久化存储：~/.claude/checkpoints/{sessionId}/{checkpointId}.json
  *
  * 注册的 RPC 方法：
  *   - listCheckpoints         → 列出指定会话的所有 checkpoint
@@ -23,23 +23,23 @@ import { mkdir, readFile, writeFile, readdir, unlink } from 'fs/promises'
 import { join } from 'path'
 import type { JsonRpcServer } from '../jsonRpcServer'
 
-// ─── 类型定义 ──────────────────────────────────────────────────────────────────
+// ─── 内部存储类型定义 ───────────────────────────────────────────────────────────
 
 /**
- * Checkpoint 数据结构
+ * Checkpoint 内部数据结构（持久化存储）
  */
 export interface Checkpoint {
   /** Checkpoint 唯一 ID */
   id: string
   /** 所属会话 ID */
   sessionId: string
-  /** Checkpoint 名称 */
-  name: string
-  /** 可选描述 */
-  description?: string
+  /** Checkpoint 标签（对应前端 tag） */
+  tag: string
+  /** 可选注释（对应前端 comment） */
+  comment?: string
   /** 创建时间（ISO 8601） */
   createdAt: string
-  /** 消息历史中的位置索引 */
+  /** 消息历史中的位置索引（对应前端 step） */
   messageIndex: number
   /** 当前消息列表快照 */
   messages: unknown[]
@@ -47,27 +47,94 @@ export interface Checkpoint {
   metadata?: Record<string, unknown>
 }
 
-/**
- * 时间线条目
- */
-interface TimelineEntry {
+// ─── 前端 DTO 类型定义 ──────────────────────────────────────────────────────────
+
+interface CheckpointListItem {
   id: string
-  name: string
-  createdAt: string
-  messageIndex: number
-  description?: string
+  created_at: string
+  step: number
+  tags: string[]
+  size_bytes: number
+}
+
+interface SaveCheckpointResult {
+  checkpoint_id: string
+  tag: string
+  step: number
+}
+
+interface RollbackCheckpointResult {
+  checkpoint_id: string
+  step: number
+  todos_count: number
+  todos_done: number
+}
+
+interface TodoChanges {
+  added: string[]
+  removed: string[]
+  completed: string[]
+  reopened: string[]
+}
+
+interface ContextChanges {
+  messages_added: number
+  system_messages_changed: boolean
+  last_user_message: string | null
+  last_assistant_message: string | null
+}
+
+interface CompareCheckpointsResult {
+  checkpoint_a_id: string
+  checkpoint_b_id: string
+  summary: string
+  step_diff: number
+  todo_diff: number
+  context_window_diff: number
+  todo_changes: TodoChanges
+  context_changes: ContextChanges
+}
+
+interface CheckpointTimelineResult {
+  timeline: string
+  checkpoints: CheckpointListItem[]
+}
+
+interface ExportCheckpointResult {
+  json_data: string
+  metadata: {
+    task_id: string
+    checkpoint_id: string
+    tags: string[]
+    step: number
+  }
+}
+
+interface ImportCheckpointResult {
+  task_id: string
+  checkpoint_id: string
+  step: number
+  tags: string[]
+}
+
+interface BatchDeleteCheckpointResult {
+  checkpoint_id: string
+  success: boolean
+  error: string | null
 }
 
 // ─── 参数 Schema ───────────────────────────────────────────────────────────────
 
 const ListCheckpointsParamsSchema = z.object({
   sessionId: z.string().min(1, '会话 ID 不能为空'),
+  limit: z.number().int().positive().optional(),
+  offset: z.number().int().nonnegative().optional(),
 })
 
 const SaveCheckpointParamsSchema = z.object({
   sessionId: z.string().min(1, '会话 ID 不能为空'),
-  name: z.string().min(1, 'Checkpoint 名称不能为空'),
-  description: z.string().optional(),
+  tag: z.string().min(1, 'Checkpoint tag 不能为空'),
+  comment: z.string().optional(),
 })
 
 const RollbackCheckpointParamsSchema = z.object({
@@ -76,24 +143,28 @@ const RollbackCheckpointParamsSchema = z.object({
 })
 
 const CompareCheckpointsParamsSchema = z.object({
-  checkpointId1: z.string().min(1),
-  checkpointId2: z.string().min(1),
+  sessionId: z.string().min(1, '会话 ID 不能为空'),
+  checkpointIdA: z.string().min(1),
+  checkpointIdB: z.string().min(1),
 })
 
 const GetCheckpointTimelineParamsSchema = z.object({
   sessionId: z.string().min(1, '会话 ID 不能为空'),
+  limit: z.number().int().positive().optional(),
+  offset: z.number().int().nonnegative().optional(),
 })
 
 const ExportCheckpointParamsSchema = z.object({
+  sessionId: z.string().min(1, '会话 ID 不能为空'),
   checkpointId: z.string().min(1, 'Checkpoint ID 不能为空'),
 })
 
 const ImportCheckpointParamsSchema = z.object({
-  sessionId: z.string().min(1, '会话 ID 不能为空'),
-  data: z.string().min(1, 'Checkpoint 数据不能为空'),
+  jsonData: z.string().min(1, 'Checkpoint 数据不能为空'),
 })
 
 const BatchDeleteCheckpointsParamsSchema = z.object({
+  sessionId: z.string().min(1, '会话 ID 不能为空'),
   checkpointIds: z.array(z.string()).min(1, '至少提供一个 Checkpoint ID'),
 })
 
@@ -101,15 +172,15 @@ const BatchDeleteCheckpointsParamsSchema = z.object({
 
 /**
  * 获取 checkpoint 存储目录
- * 格式：~/.claude-desktop/checkpoints/{sessionId}
+ * 格式：~/.claude/checkpoints/{sessionId}
  */
 function getCheckpointDir(sessionId: string): string {
-  return join(homedir(), '.claude-desktop', 'checkpoints', sessionId)
+  return join(homedir(), '.claude', 'checkpoints', sessionId)
 }
 
 /**
  * 获取单个 checkpoint 文件路径
- * 格式：~/.claude-desktop/checkpoints/{sessionId}/{checkpointId}.json
+ * 格式：~/.claude/checkpoints/{sessionId}/{checkpointId}.json
  */
 function getCheckpointPath(sessionId: string, checkpointId: string): string {
   return join(getCheckpointDir(sessionId), `${checkpointId}.json`)
@@ -182,6 +253,19 @@ async function listCheckpointFiles(sessionId: string): Promise<Checkpoint[]> {
   }
 }
 
+/**
+ * 将内部 Checkpoint 转换为前端 CheckpointListItem DTO
+ */
+function toCheckpointListItem(cp: Checkpoint): CheckpointListItem {
+  return {
+    id: cp.id,
+    created_at: cp.createdAt,
+    step: cp.messageIndex,
+    tags: cp.tag ? [cp.tag] : [],
+    size_bytes: 0,
+  }
+}
+
 // ─── 注册函数 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -196,10 +280,11 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'listCheckpoints',
-    async (params: unknown): Promise<{ checkpoints: Checkpoint[] }> => {
-      const { sessionId } = ListCheckpointsParamsSchema.parse(params)
-      const checkpoints = await listCheckpointFiles(sessionId)
-      return { checkpoints }
+    async (params: unknown): Promise<CheckpointListItem[]> => {
+      const { sessionId, limit, offset = 0 } = ListCheckpointsParamsSchema.parse(params)
+      let checkpoints = await listCheckpointFiles(sessionId)
+      checkpoints = checkpoints.slice(offset, limit !== undefined ? offset + limit : undefined)
+      return checkpoints.map(toCheckpointListItem)
     },
   )
 
@@ -207,9 +292,8 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'saveCheckpoint',
-    async (params: unknown): Promise<{ checkpoint: Checkpoint }> => {
-      const { sessionId, name, description } =
-        SaveCheckpointParamsSchema.parse(params)
+    async (params: unknown): Promise<SaveCheckpointResult> => {
+      const { sessionId, tag, comment } = SaveCheckpointParamsSchema.parse(params)
 
       // 获取当前会话消息（用于快照）
       let messages: unknown[] = []
@@ -226,15 +310,20 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
       const checkpoint: Checkpoint = {
         id: randomUUID(),
         sessionId,
-        name,
-        description,
+        tag,
+        comment,
         createdAt: new Date().toISOString(),
         messageIndex: messages.length,
         messages,
       }
 
       await writeCheckpoint(checkpoint)
-      return { checkpoint }
+
+      return {
+        checkpoint_id: checkpoint.id,
+        tag: checkpoint.tag,
+        step: checkpoint.messageIndex,
+      }
     },
   )
 
@@ -242,15 +331,12 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'rollbackCheckpoint',
-    async (
-      params: unknown,
-    ): Promise<{ rolledBack: boolean; messageCount: number }> => {
-      const { sessionId, checkpointId } =
-        RollbackCheckpointParamsSchema.parse(params)
+    async (params: unknown): Promise<RollbackCheckpointResult> => {
+      const { sessionId, checkpointId } = RollbackCheckpointParamsSchema.parse(params)
 
       const checkpoint = await readCheckpoint(sessionId, checkpointId)
       if (!checkpoint) {
-        return { rolledBack: false, messageCount: 0 }
+        throw new Error(`Checkpoint 不存在: ${checkpointId}`)
       }
 
       // 回滚操作：清空当前会话（简化实现）
@@ -258,11 +344,13 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
       try {
         await agentCore.clearSession()
         return {
-          rolledBack: true,
-          messageCount: checkpoint.messages.length,
+          checkpoint_id: checkpoint.id,
+          step: checkpoint.messageIndex,
+          todos_count: 0,
+          todos_done: 0,
         }
-      } catch {
-        return { rolledBack: false, messageCount: 0 }
+      } catch (err) {
+        throw new Error(`回滚失败: ${err instanceof Error ? err.message : String(err)}`)
       }
     },
   )
@@ -271,59 +359,51 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'compareCheckpoints',
-    async (
-      params: unknown,
-    ): Promise<{
-      diff: {
-        checkpoint1: { id: string; name: string; messageCount: number }
-        checkpoint2: { id: string; name: string; messageCount: number }
-        messageDelta: number
-        timeDelta: number
+    async (params: unknown): Promise<CompareCheckpointsResult> => {
+      const { sessionId, checkpointIdA, checkpointIdB } = CompareCheckpointsParamsSchema.parse(params)
+
+      const cp1 = await readCheckpoint(sessionId, checkpointIdA)
+      const cp2 = await readCheckpoint(sessionId, checkpointIdB)
+
+      if (!cp1) {
+        throw new Error(`Checkpoint 不存在: ${checkpointIdA}`)
       }
-    }> => {
-      const { checkpointId1, checkpointId2 } =
-        CompareCheckpointsParamsSchema.parse(params)
+      if (!cp2) {
+        throw new Error(`Checkpoint 不存在: ${checkpointIdB}`)
+      }
 
-      // 两个 checkpoint 可能来自不同会话，需要查找
-      // 简化实现：通过枚举目录查找
-      const baseDir = join(homedir(), '.claude-desktop', 'checkpoints')
-      let cp1: Checkpoint | null = null
-      let cp2: Checkpoint | null = null
+      const stepDiff = cp2.messageIndex - cp1.messageIndex
+      const msgAdded = Math.max(0, stepDiff)
 
-      try {
-        const sessions = await readdir(baseDir)
-        for (const sessionId of sessions) {
-          if (!cp1) cp1 = await readCheckpoint(sessionId, checkpointId1)
-          if (!cp2) cp2 = await readCheckpoint(sessionId, checkpointId2)
-          if (cp1 && cp2) break
+      // 尝试从消息列表中提取最后一条 user/assistant 消息
+      const getLastMsg = (msgs: unknown[], role: string): string | null => {
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i] as Record<string, unknown>
+          if (m['role'] === role) {
+            return typeof m['content'] === 'string' ? m['content'] : null
+          }
         }
-      } catch {
-        // 目录不存在
+        return null
       }
-
-      if (!cp1 || !cp2) {
-        throw new Error(
-          `Checkpoint 不存在: ${!cp1 ? checkpointId1 : checkpointId2}`,
-        )
-      }
-
-      const time1 = new Date(cp1.createdAt).getTime()
-      const time2 = new Date(cp2.createdAt).getTime()
 
       return {
-        diff: {
-          checkpoint1: {
-            id: cp1.id,
-            name: cp1.name,
-            messageCount: cp1.messages.length,
-          },
-          checkpoint2: {
-            id: cp2.id,
-            name: cp2.name,
-            messageCount: cp2.messages.length,
-          },
-          messageDelta: cp2.messages.length - cp1.messages.length,
-          timeDelta: time2 - time1,
+        checkpoint_a_id: cp1.id,
+        checkpoint_b_id: cp2.id,
+        summary: `从 step ${cp1.messageIndex} 到 step ${cp2.messageIndex}，差距 ${Math.abs(stepDiff)} 步`,
+        step_diff: stepDiff,
+        todo_diff: 0,
+        context_window_diff: msgAdded,
+        todo_changes: {
+          added: [],
+          removed: [],
+          completed: [],
+          reopened: [],
+        },
+        context_changes: {
+          messages_added: msgAdded,
+          system_messages_changed: false,
+          last_user_message: getLastMsg(cp2.messages, 'user'),
+          last_assistant_message: getLastMsg(cp2.messages, 'assistant'),
         },
       }
     },
@@ -333,19 +413,21 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'getCheckpointTimeline',
-    async (params: unknown): Promise<{ timeline: TimelineEntry[] }> => {
-      const { sessionId } = GetCheckpointTimelineParamsSchema.parse(params)
-      const checkpoints = await listCheckpointFiles(sessionId)
+    async (params: unknown): Promise<CheckpointTimelineResult> => {
+      const { sessionId, limit, offset = 0 } = GetCheckpointTimelineParamsSchema.parse(params)
+      let checkpoints = await listCheckpointFiles(sessionId)
+      checkpoints = checkpoints.slice(offset, limit !== undefined ? offset + limit : undefined)
 
-      const timeline: TimelineEntry[] = checkpoints.map(cp => ({
-        id: cp.id,
-        name: cp.name,
-        createdAt: cp.createdAt,
-        messageIndex: cp.messageIndex,
-        description: cp.description,
-      }))
+      const items = checkpoints.map(toCheckpointListItem)
 
-      return { timeline }
+      // 生成简单的文字时间线
+      const timeline = checkpoints.length === 0
+        ? '暂无 Checkpoint'
+        : checkpoints
+            .map((cp, i) => `[${i + 1}] ${cp.tag} (step ${cp.messageIndex}) @ ${cp.createdAt}`)
+            .join('\n')
+
+      return { timeline, checkpoints: items }
     },
   )
 
@@ -353,28 +435,23 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'exportCheckpoint',
-    async (params: unknown): Promise<{ data: string }> => {
-      const { checkpointId } = ExportCheckpointParamsSchema.parse(params)
+    async (params: unknown): Promise<ExportCheckpointResult> => {
+      const { sessionId, checkpointId } = ExportCheckpointParamsSchema.parse(params)
 
-      // 查找 checkpoint（遍历所有会话目录）
-      const baseDir = join(homedir(), '.claude-desktop', 'checkpoints')
-      let found: Checkpoint | null = null
-
-      try {
-        const sessions = await readdir(baseDir)
-        for (const sessionId of sessions) {
-          found = await readCheckpoint(sessionId, checkpointId)
-          if (found) break
-        }
-      } catch {
-        // 目录不存在
-      }
-
+      const found = await readCheckpoint(sessionId, checkpointId)
       if (!found) {
         throw new Error(`Checkpoint 不存在: ${checkpointId}`)
       }
 
-      return { data: JSON.stringify(found) }
+      return {
+        json_data: JSON.stringify(found),
+        metadata: {
+          task_id: found.sessionId,
+          checkpoint_id: found.id,
+          tags: found.tag ? [found.tag] : [],
+          step: found.messageIndex,
+        },
+      }
     },
   )
 
@@ -382,27 +459,32 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'importCheckpoint',
-    async (params: unknown): Promise<{ checkpoint: Checkpoint }> => {
-      const { sessionId, data } = ImportCheckpointParamsSchema.parse(params)
+    async (params: unknown): Promise<ImportCheckpointResult> => {
+      const { jsonData } = ImportCheckpointParamsSchema.parse(params)
 
       let imported: Checkpoint
       try {
-        imported = JSON.parse(data) as Checkpoint
+        imported = JSON.parse(jsonData) as Checkpoint
       } catch {
         throw new Error('导入数据格式无效：不是有效的 JSON')
       }
 
-      // 覆盖 sessionId 和生成新 ID（避免冲突）
+      // 生成新 ID（避免冲突）
       const { randomUUID } = await import('crypto')
       const checkpoint: Checkpoint = {
         ...imported,
         id: randomUUID(),
-        sessionId,
         createdAt: new Date().toISOString(),
       }
 
       await writeCheckpoint(checkpoint)
-      return { checkpoint }
+
+      return {
+        task_id: checkpoint.sessionId,
+        checkpoint_id: checkpoint.id,
+        step: checkpoint.messageIndex,
+        tags: checkpoint.tag ? [checkpoint.tag] : [],
+      }
     },
   )
 
@@ -410,34 +492,26 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'batchDeleteCheckpoints',
-    async (params: unknown): Promise<{ deleted: number }> => {
-      const { checkpointIds } = BatchDeleteCheckpointsParamsSchema.parse(params)
+    async (params: unknown): Promise<BatchDeleteCheckpointResult[]> => {
+      const { sessionId, checkpointIds } = BatchDeleteCheckpointsParamsSchema.parse(params)
 
-      const baseDir = join(homedir(), '.claude-desktop', 'checkpoints')
-      let deleted = 0
-
-      let sessionDirs: string[] = []
-      try {
-        sessionDirs = await readdir(baseDir)
-      } catch {
-        // 目录不存在，没有可删除的内容
-        return { deleted: 0 }
-      }
+      const results: BatchDeleteCheckpointResult[] = []
 
       for (const checkpointId of checkpointIds) {
-        for (const sessionId of sessionDirs) {
-          const filePath = getCheckpointPath(sessionId, checkpointId)
-          try {
-            await unlink(filePath)
-            deleted++
-            break // 找到并删除后跳出内层循环
-          } catch {
-            // 文件不存在或删除失败，继续尝试下一个 session
-          }
+        const filePath = getCheckpointPath(sessionId, checkpointId)
+        try {
+          await unlink(filePath)
+          results.push({ checkpoint_id: checkpointId, success: true, error: null })
+        } catch (err) {
+          results.push({
+            checkpoint_id: checkpointId,
+            success: false,
+            error: err instanceof Error ? err.message : String(err),
+          })
         }
       }
 
-      return { deleted }
+      return results
     },
   )
 }

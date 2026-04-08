@@ -35,6 +35,14 @@ const DeleteSessionParamsSchema = z.object({
 
 // ─── 返回类型定义 ──────────────────────────────────────────────────────────────
 
+interface SessionMessage {
+  id?: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at?: string
+  [key: string]: unknown
+}
+
 interface SessionItem {
   id: string
   title?: string
@@ -43,15 +51,6 @@ interface SessionItem {
   created_at?: string
   updated_at?: string
   [key: string]: unknown
-}
-
-interface SessionsResult {
-  sessions?: SessionItem[]
-  [key: string]: unknown
-}
-
-interface SessionMessagesResult {
-  messages: unknown[]
 }
 
 interface DeleteSessionResult {
@@ -124,22 +123,30 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
 
   server.registerMethod(
     'getSessionMessages',
-    async (params: unknown): Promise<SessionMessagesResult> => {
+    async (params: unknown): Promise<SessionMessage[]> => {
       const { sessionId, offset = 0, limit } = GetSessionMessagesParamsSchema.parse(params)
 
       try {
         const session = await agentCore.getSession(sessionId)
         if (!session) {
-          return { messages: [] }
+          return []
         }
-        const msgs = session.messages ?? []
+        const msgs: SessionMessage[] = (session.messages ?? []).map((m: unknown) => {
+          const msg = m as Record<string, unknown>
+          return {
+            id: msg['id'] as string | undefined,
+            role: (msg['role'] as 'user' | 'assistant') ?? 'user',
+            content: typeof msg['content'] === 'string' ? msg['content'] : String(msg['content'] ?? ''),
+            created_at: msg['created_at'] as string | undefined,
+          }
+        })
         // 支持分页
         const sliced = limit !== undefined
           ? msgs.slice(offset, offset + limit)
           : msgs.slice(offset)
-        return { messages: sliced }
+        return sliced
       } catch {
-        return { messages: [] }
+        return []
       }
     },
   )

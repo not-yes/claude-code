@@ -12,7 +12,7 @@
  *   - searchRemoteSkills → 搜索远程技能（暂返回空数组）
  *
  * 数据存储：
- *   - ~/.claude-desktop/skills/{skillId}.json → 技能配置（含 content）
+ *   - ~/.claude/skills/{skillId}.json → 技能配置（含 content）
  */
 
 import { promises as fs } from 'fs'
@@ -20,21 +20,57 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 
-// ─── 类型定义 ─────────────────────────────────────────────────────────────────
+// ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
 
+/**
+ * 内部存储的 Skill 结构
+ */
 export interface Skill {
   id: string
   name: string
-  description?: string
+  description: string
+  category: string
   version: string
-  author?: string
-  content: string // 技能定义内容（Markdown）
-  isInstalled: boolean
-  installedAt?: string
-  source?: 'local' | 'remote'
-  remoteUrl?: string
+  guidance: string           // 技能指导内容（Markdown）
+  trigger_patterns: string[] // 触发模式
+  suggested_tools: string[]  // 建议工具列表
+  suggested_action?: string  // 建议动作
+  source: string             // 来源：'local' | 'remote' | url
+  file_path: string          // 文件路径
+  installed: boolean
+  scripts?: { name: string; file: string; description: string }[]
   createdAt: string
   updatedAt: string
+}
+
+// ─── 前端 DTO 类型定义 ────────────────────────────────────────────────────────
+
+interface SkillInfoDTO {
+  name: string
+  description: string
+  category: string
+  version: string
+  trigger_patterns: string[]
+  suggested_tools: string[]
+  source: string
+  file_path?: string
+  installed?: boolean
+}
+
+interface SkillDetailDTO extends SkillInfoDTO {
+  file_path: string
+  guidance: string
+  suggested_action?: string
+  scripts?: { name: string; file: string; description: string }[]
+}
+
+interface RemoteSkillItemDTO {
+  id: string
+  name: string
+  description: string
+  source: string
+  installed: boolean
+  install_command: string
 }
 
 // ─── 服务接口 ─────────────────────────────────────────────────────────────────
@@ -45,7 +81,7 @@ interface ServerLike {
 
 // ─── 存储路径 ─────────────────────────────────────────────────────────────────
 
-const SKILLS_DIR = join(homedir(), '.claude-desktop', 'skills')
+const SKILLS_DIR = join(homedir(), '.claude', 'skills')
 
 /**
  * 技能配置文件路径
@@ -94,9 +130,9 @@ async function readAllSkills(): Promise<Skill[]> {
 }
 
 /**
- * 读取单个技能配置
+ * 读取单个技能配置（按 ID）
  */
-async function readSkill(skillId: string): Promise<Skill | null> {
+async function readSkillById(skillId: string): Promise<Skill | null> {
   try {
     const content = await fs.readFile(skillFilePath(skillId), 'utf-8')
     return JSON.parse(content) as Skill
@@ -109,6 +145,14 @@ async function readSkill(skillId: string): Promise<Skill | null> {
 }
 
 /**
+ * 按 name 查找技能（遍历所有技能）
+ */
+async function readSkillByName(name: string): Promise<Skill | null> {
+  const skills = await readAllSkills()
+  return skills.find(s => s.name === name) ?? null
+}
+
+/**
  * 写入技能配置
  */
 async function writeSkill(skill: Skill): Promise<void> {
@@ -116,176 +160,240 @@ async function writeSkill(skill: Skill): Promise<void> {
   await fs.writeFile(skillFilePath(skill.id), JSON.stringify(skill, null, 2), 'utf-8')
 }
 
+// ─── DTO 转换 ─────────────────────────────────────────────────────────────────
+
+/**
+ * 将内部 Skill 转换为前端 SkillInfo DTO
+ */
+function toSkillInfo(skill: Skill): SkillInfoDTO {
+  return {
+    name: skill.name,
+    description: skill.description,
+    category: skill.category,
+    version: skill.version,
+    trigger_patterns: skill.trigger_patterns,
+    suggested_tools: skill.suggested_tools,
+    source: skill.source,
+    file_path: skill.file_path,
+    installed: skill.installed,
+  }
+}
+
+/**
+ * 将内部 Skill 转换为前端 SkillDetail DTO
+ */
+function toSkillDetail(skill: Skill): SkillDetailDTO {
+  return {
+    name: skill.name,
+    description: skill.description,
+    category: skill.category,
+    version: skill.version,
+    trigger_patterns: skill.trigger_patterns,
+    suggested_tools: skill.suggested_tools,
+    source: skill.source,
+    file_path: skill.file_path,
+    installed: skill.installed,
+    guidance: skill.guidance,
+    suggested_action: skill.suggested_action,
+    scripts: skill.scripts,
+  }
+}
+
 // ─── 方法实现 ─────────────────────────────────────────────────────────────────
 
 /**
- * getSkills → 获取所有技能
+ * getSkills → 获取所有技能，返回 SkillInfo[]
  */
-async function getSkills(): Promise<{ skills: Skill[] }> {
+async function getSkills(): Promise<SkillInfoDTO[]> {
   const skills = await readAllSkills()
   // 按创建时间降序排列
   skills.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  return { skills }
+  return skills.map(toSkillInfo)
 }
 
 /**
- * getSkill → 获取单个技能
+ * getSkill → 获取单个技能详情（按 name 查找），返回 SkillDetail
  */
-async function getSkill(params: { id: string }): Promise<{ skill: Skill | null }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+async function getSkill(params: { name: string }): Promise<SkillDetailDTO> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
-  const skill = await readSkill(params.id)
-  return { skill }
+  const skill = await readSkillByName(params.name)
+  if (!skill) {
+    throw new Error(`技能不存在: ${params.name}`)
+  }
+  return toSkillDetail(skill)
 }
 
 /**
- * createSkill → 创建新技能
+ * createSkill → 创建新技能，返回 SkillInfo
  */
 async function createSkill(params: {
   name: string
   description?: string
-  content: string
-  version?: string
-}): Promise<{ skill: Skill }> {
+  category?: string
+  guidance?: string
+  trigger_patterns?: string[]
+  suggested_tools?: string[]
+}): Promise<SkillInfoDTO> {
   if (!params.name || typeof params.name !== 'string') {
     throw new Error('参数 name 不能为空')
   }
-  if (!params.content || typeof params.content !== 'string') {
-    throw new Error('参数 content 不能为空')
-  }
 
   const now = new Date().toISOString()
+  const id = randomUUID()
+  const filePath = skillFilePath(id)
+
   const skill: Skill = {
-    id: randomUUID(),
+    id,
     name: params.name,
-    description: params.description,
-    version: params.version ?? '1.0.0',
-    content: params.content,
-    isInstalled: false,
+    description: params.description ?? '',
+    category: params.category ?? 'general',
+    version: '1.0.0',
+    guidance: params.guidance ?? '',
+    trigger_patterns: params.trigger_patterns ?? [],
+    suggested_tools: params.suggested_tools ?? [],
     source: 'local',
+    file_path: filePath,
+    installed: false,
     createdAt: now,
     updatedAt: now,
   }
 
   await writeSkill(skill)
-  return { skill }
+  return toSkillInfo(skill)
 }
 
 /**
- * installSkill → 安装技能
- * - 如果提供 id：将已有技能标记为已安装
- * - 如果提供 remoteUrl：从远端安装（当前实现为标记 source='remote'）
+ * installSkill → 安装技能（按 skill_id 或远程 source）
+ * 返回 SkillInfo
  */
 async function installSkill(params: {
-  id?: string
-  remoteUrl?: string
-}): Promise<{ skill: Skill }> {
-  if (!params.id && !params.remoteUrl) {
-    throw new Error('参数 id 或 remoteUrl 至少提供一个')
+  skill_id: string
+  source?: string
+}): Promise<SkillInfoDTO> {
+  if (!params.skill_id) {
+    throw new Error('参数 skill_id 不能为空')
   }
 
   const now = new Date().toISOString()
 
-  if (params.remoteUrl) {
-    // 远程安装：标记 source='remote'，content 暂用 URL 占位
-    // 实际远程市场集成后可在此处发起 HTTP 请求拉取内容
+  // 尝试按 ID 查找已有技能
+  let existing = await readSkillById(params.skill_id)
+
+  if (!existing && params.source) {
+    // 远程安装：创建新技能记录
+    const id = randomUUID()
+    const filePath = skillFilePath(id)
     const skill: Skill = {
-      id: randomUUID(),
-      name: params.remoteUrl.split('/').pop() ?? 'remote-skill',
+      id,
+      name: params.skill_id,
+      description: `从 ${params.source} 安装的远程技能`,
+      category: 'remote',
       version: '1.0.0',
-      content: `# Remote Skill\n\nSource: ${params.remoteUrl}\n`,
-      isInstalled: true,
-      installedAt: now,
-      source: 'remote',
-      remoteUrl: params.remoteUrl,
+      guidance: '',
+      trigger_patterns: [],
+      suggested_tools: [],
+      source: params.source,
+      file_path: filePath,
+      installed: true,
       createdAt: now,
       updatedAt: now,
     }
     await writeSkill(skill)
-    return { skill }
+    return toSkillInfo(skill)
   }
 
-  // 本地安装：找到已有技能并标记 isInstalled=true
-  const existing = await readSkill(params.id!)
   if (!existing) {
-    throw new Error(`技能不存在: ${params.id}`)
+    // 也尝试按 name 查找
+    existing = await readSkillByName(params.skill_id)
+  }
+
+  if (!existing) {
+    throw new Error(`技能不存在: ${params.skill_id}`)
   }
 
   const updated: Skill = {
     ...existing,
-    isInstalled: true,
-    installedAt: now,
+    installed: true,
     updatedAt: now,
   }
 
   await writeSkill(updated)
-  return { skill: updated }
+  return toSkillInfo(updated)
 }
 
 /**
- * updateSkill → 更新技能
+ * updateSkill → 更新技能（按 name 查找），返回 SkillDetail
  */
 async function updateSkill(params: {
-  id: string
-  name?: string
+  name: string
   description?: string
-  content?: string
-  version?: string
-}): Promise<{ skill: Skill }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+  category?: string
+  guidance?: string
+  trigger_patterns?: string[]
+  suggested_tools?: string[]
+  suggested_action?: string
+}): Promise<SkillDetailDTO> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
 
-  const existing = await readSkill(params.id)
+  const existing = await readSkillByName(params.name)
   if (!existing) {
-    throw new Error(`技能不存在: ${params.id}`)
+    throw new Error(`技能不存在: ${params.name}`)
   }
 
   const now = new Date().toISOString()
   const updated: Skill = {
     ...existing,
-    name: params.name !== undefined ? params.name : existing.name,
     description: params.description !== undefined ? params.description : existing.description,
-    content: params.content !== undefined ? params.content : existing.content,
-    version: params.version !== undefined ? params.version : existing.version,
+    category: params.category !== undefined ? params.category : existing.category,
+    guidance: params.guidance !== undefined ? params.guidance : existing.guidance,
+    trigger_patterns: params.trigger_patterns !== undefined ? params.trigger_patterns : existing.trigger_patterns,
+    suggested_tools: params.suggested_tools !== undefined ? params.suggested_tools : existing.suggested_tools,
+    suggested_action: params.suggested_action !== undefined ? params.suggested_action : existing.suggested_action,
     updatedAt: now,
   }
 
   await writeSkill(updated)
-  return { skill: updated }
+  return toSkillDetail(updated)
 }
 
 /**
- * deleteSkill → 删除技能
+ * deleteSkill → 删除技能（按 name 查找），返回 void
  */
-async function deleteSkill(params: { id: string }): Promise<{ deleted: boolean }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+async function deleteSkill(params: { name: string }): Promise<void> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
+  }
+
+  const existing = await readSkillByName(params.name)
+  if (!existing) {
+    throw new Error(`技能不存在: ${params.name}`)
   }
 
   try {
-    await fs.unlink(skillFilePath(params.id))
-    return { deleted: true }
+    await fs.unlink(skillFilePath(existing.id))
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { deleted: false }
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw err
     }
-    throw err
   }
 }
 
 /**
- * searchRemoteSkills → 搜索远程技能市场
+ * searchRemoteSkills → 搜索远程技能市场，返回 RemoteSkillItem[]
  * 当前实现：返回空数组（远程市场功能待实现）
  */
 async function searchRemoteSkills(params: {
-  query: string
+  q: string
   limit?: number
-}): Promise<{ skills: Skill[] }> {
+  source?: string
+}): Promise<RemoteSkillItemDTO[]> {
   // TODO: 远程技能市场集成后在此实现 HTTP 搜索请求
   void params
-  return { skills: [] }
+  return []
 }
 
 // ─── 注册函数 ─────────────────────────────────────────────────────────────────
@@ -299,41 +407,41 @@ export function registerSkillHandlers(server: ServerLike): void {
   })
 
   server.registerMethod('getSkill', async (params: unknown) => {
-    return getSkill(params as { id: string })
+    return getSkill(params as { name: string })
   })
 
   server.registerMethod('createSkill', async (params: unknown) => {
-    return createSkill(
-      params as {
-        name: string
-        description?: string
-        content: string
-        version?: string
-      },
-    )
+    return createSkill(params as {
+      name: string
+      description?: string
+      category?: string
+      guidance?: string
+      trigger_patterns?: string[]
+      suggested_tools?: string[]
+    })
   })
 
   server.registerMethod('installSkill', async (params: unknown) => {
-    return installSkill(params as { id?: string; remoteUrl?: string })
+    return installSkill(params as { skill_id: string; source?: string })
   })
 
   server.registerMethod('updateSkill', async (params: unknown) => {
-    return updateSkill(
-      params as {
-        id: string
-        name?: string
-        description?: string
-        content?: string
-        version?: string
-      },
-    )
+    return updateSkill(params as {
+      name: string
+      description?: string
+      category?: string
+      guidance?: string
+      trigger_patterns?: string[]
+      suggested_tools?: string[]
+      suggested_action?: string
+    })
   })
 
   server.registerMethod('deleteSkill', async (params: unknown) => {
-    return deleteSkill(params as { id: string })
+    return deleteSkill(params as { name: string })
   })
 
   server.registerMethod('searchRemoteSkills', async (params: unknown) => {
-    return searchRemoteSkills(params as { query: string; limit?: number })
+    return searchRemoteSkills(params as { q: string; limit?: number; source?: string })
   })
 }

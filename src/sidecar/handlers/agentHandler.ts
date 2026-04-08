@@ -14,8 +14,8 @@
  *   - clearAgentMemory      → 清空 Agent 记忆
  *
  * 数据存储：
- *   - ~/.claude-desktop/agents/{agentId}.json           → Agent 配置
- *   - ~/.claude-desktop/agents/{agentId}/memories.json  → Agent 记忆
+ *   - ~/.claude/agents/{agentId}.json           → Agent 配置
+ *   - ~/.claude/agents/{agentId}/memories.json  → Agent 记忆
  */
 
 import { promises as fs } from 'fs'
@@ -23,28 +23,94 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 
-// ─── 类型定义 ─────────────────────────────────────────────────────────────────
+// ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
 
+/**
+ * 内部存储的 AgentConfig 结构
+ */
 export interface AgentConfig {
   id: string
   name: string
   description?: string
-  systemPrompt?: string
+  soul?: string             // system prompt / soul
+  topology?: string         // react / dag / linear
   model?: string
-  tools?: string[] // 允许使用的工具列表
-  skills?: string[] // 关联的技能 ID
+  max_iterations?: number
+  tools?: string[]          // 允许使用的工具列表
+  skills?: string[]         // 关联的技能列表
+  handoffs?: string[]       // 转交的 Agent 列表
+  has_memory?: boolean
+  memory?: {
+    enabled: boolean
+    memory_type: string
+    persist: boolean
+  }
+  hitl?: {
+    enabled: boolean
+    strict_mode?: boolean
+    before_tools?: boolean
+  }
   createdAt: string
   updatedAt: string
   metadata?: Record<string, unknown>
 }
 
-export interface AgentMemoryEntry {
+/**
+ * 内部 Agent 记忆条目（存储结构）
+ */
+export interface AgentMemoryEntryStore {
   id: string
   agentId: string
   content: string
+  importance?: number
   embedding?: number[]
   createdAt: string
+  accessCount?: number
   tags?: string[]
+}
+
+// ─── 前端 DTO 类型定义 ────────────────────────────────────────────────────────
+
+interface AgentInfoDTO {
+  name: string
+  description?: string
+  topology?: string
+  skills?: string[]
+  handoffs?: string[]
+  has_memory?: boolean
+}
+
+interface AgentDetailDTO extends AgentInfoDTO {
+  soul?: string
+  memory?: {
+    enabled: boolean
+    memory_type: string
+    persist: boolean
+  }
+  hitl?: {
+    enabled: boolean
+    strict_mode?: boolean
+    before_tools?: boolean
+  }
+  model?: string
+  max_iterations?: number
+}
+
+interface AgentMemoryEntryDTO {
+  id: string
+  content: string
+  importance?: number
+  created_at?: string
+  access_count?: number
+}
+
+interface AgentMemoryStatsDTO {
+  agent: string
+  stats: {
+    short_term_count: number
+    long_term_count: number
+    episodic_count: number
+  }
 }
 
 // ─── 服务接口 ─────────────────────────────────────────────────────────────────
@@ -55,10 +121,10 @@ interface ServerLike {
 
 // ─── 存储路径 ─────────────────────────────────────────────────────────────────
 
-const AGENTS_DIR = join(homedir(), '.claude-desktop', 'agents')
+const AGENTS_DIR = join(homedir(), '.claude', 'agents')
 
 /**
- * Agent 配置文件路径
+ * Agent 配置文件路径（使用 agentName 作为文件名，kebab-case）
  */
 function agentConfigPath(agentId: string): string {
   return join(AGENTS_DIR, `${agentId}.json`)
@@ -126,9 +192,9 @@ async function readAllAgents(): Promise<AgentConfig[]> {
 }
 
 /**
- * 读取单个 Agent 配置
+ * 读取单个 Agent 配置（按 ID 读取）
  */
-async function readAgent(agentId: string): Promise<AgentConfig | null> {
+async function readAgentById(agentId: string): Promise<AgentConfig | null> {
   try {
     const content = await fs.readFile(agentConfigPath(agentId), 'utf-8')
     return JSON.parse(content) as AgentConfig
@@ -138,6 +204,14 @@ async function readAgent(agentId: string): Promise<AgentConfig | null> {
     }
     throw err
   }
+}
+
+/**
+ * 按 name 查找 Agent（遍历所有 Agent）
+ */
+async function readAgentByName(name: string): Promise<AgentConfig | null> {
+  const agents = await readAllAgents()
+  return agents.find(a => a.name === name) ?? null
 }
 
 /**
@@ -151,10 +225,10 @@ async function writeAgent(agent: AgentConfig): Promise<void> {
 /**
  * 读取 Agent 记忆列表
  */
-async function readAgentMemories(agentId: string): Promise<AgentMemoryEntry[]> {
+async function readAgentMemories(agentId: string): Promise<AgentMemoryEntryStore[]> {
   try {
     const content = await fs.readFile(agentMemoryPath(agentId), 'utf-8')
-    return JSON.parse(content) as AgentMemoryEntry[]
+    return JSON.parse(content) as AgentMemoryEntryStore[]
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       return []
@@ -166,45 +240,95 @@ async function readAgentMemories(agentId: string): Promise<AgentMemoryEntry[]> {
 /**
  * 写入 Agent 记忆列表
  */
-async function writeAgentMemories(agentId: string, memories: AgentMemoryEntry[]): Promise<void> {
+async function writeAgentMemories(agentId: string, memories: AgentMemoryEntryStore[]): Promise<void> {
   await ensureAgentMemoryDir(agentId)
   await fs.writeFile(agentMemoryPath(agentId), JSON.stringify(memories, null, 2), 'utf-8')
+}
+
+// ─── DTO 转换 ─────────────────────────────────────────────────────────────────
+
+/**
+ * 将内部 AgentConfig 转换为前端 AgentInfo DTO
+ */
+function toAgentInfo(agent: AgentConfig): AgentInfoDTO {
+  return {
+    name: agent.name,
+    description: agent.description,
+    topology: agent.topology,
+    skills: agent.skills,
+    handoffs: agent.handoffs,
+    has_memory: agent.has_memory ?? (agent.memory?.enabled ?? false),
+  }
+}
+
+/**
+ * 将内部 AgentConfig 转换为前端 AgentDetail DTO
+ */
+function toAgentDetail(agent: AgentConfig): AgentDetailDTO {
+  return {
+    name: agent.name,
+    description: agent.description,
+    topology: agent.topology,
+    skills: agent.skills,
+    handoffs: agent.handoffs,
+    has_memory: agent.has_memory ?? (agent.memory?.enabled ?? false),
+    soul: agent.soul,
+    memory: agent.memory,
+    hitl: agent.hitl,
+    model: agent.model,
+    max_iterations: agent.max_iterations,
+  }
+}
+
+/**
+ * 将内部记忆条目转换为前端 DTO
+ */
+function toMemoryEntryDTO(m: AgentMemoryEntryStore): AgentMemoryEntryDTO {
+  return {
+    id: m.id,
+    content: m.content,
+    importance: m.importance,
+    created_at: m.createdAt,
+    access_count: m.accessCount,
+  }
 }
 
 // ─── 方法实现 ─────────────────────────────────────────────────────────────────
 
 /**
- * getAgents → 获取所有 Agent 配置
+ * getAgents → 获取所有 Agent 配置，返回 AgentInfo[]
  */
-async function getAgents(): Promise<{ agents: AgentConfig[] }> {
+async function getAgents(): Promise<AgentInfoDTO[]> {
   const agents = await readAllAgents()
   // 按创建时间降序排列
   agents.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  return { agents }
+  return agents.map(toAgentInfo)
 }
 
 /**
- * getAgent → 获取单个 Agent 配置
+ * getAgent → 获取单个 Agent 详情（按 name 查找）
  */
-async function getAgent(params: { id: string }): Promise<{ agent: AgentConfig | null }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+async function getAgent(params: { name: string }): Promise<AgentDetailDTO> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
-  const agent = await readAgent(params.id)
-  return { agent }
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
+    throw new Error(`Agent 不存在: ${params.name}`)
+  }
+  return toAgentDetail(agent)
 }
 
 /**
- * createAgent → 创建新 Agent
+ * createAgent → 创建新 Agent，返回 {name}
  */
 async function createAgent(params: {
   name: string
+  soul?: string
   description?: string
-  systemPrompt?: string
-  model?: string
-  tools?: string[]
   skills?: string[]
-}): Promise<{ agent: AgentConfig }> {
+  handoffs?: string[]
+}): Promise<{ name: string }> {
   if (!params.name || typeof params.name !== 'string') {
     throw new Error('参数 name 不能为空')
   }
@@ -214,104 +338,105 @@ async function createAgent(params: {
     id: randomUUID(),
     name: params.name,
     description: params.description,
-    systemPrompt: params.systemPrompt,
-    model: params.model,
-    tools: params.tools ?? [],
+    soul: params.soul,
     skills: params.skills ?? [],
+    handoffs: params.handoffs ?? [],
     createdAt: now,
     updatedAt: now,
   }
 
   await writeAgent(agent)
-  return { agent }
+  return { name: agent.name }
 }
 
 /**
- * updateAgent → 更新 Agent 配置
+ * updateAgent → 更新 Agent 配置（按 name 查找），返回 void
  */
 async function updateAgent(params: {
-  id: string
-  name?: string
+  name: string
+  soul?: string
   description?: string
-  systemPrompt?: string
-  model?: string
-  tools?: string[]
   skills?: string[]
-}): Promise<{ agent: AgentConfig }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+  handoffs?: string[]
+  model?: string
+  max_iterations?: number
+  topology?: string
+}): Promise<void> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
 
-  const existing = await readAgent(params.id)
+  const existing = await readAgentByName(params.name)
   if (!existing) {
-    throw new Error(`Agent 不存在: ${params.id}`)
+    throw new Error(`Agent 不存在: ${params.name}`)
   }
 
   const now = new Date().toISOString()
   const updated: AgentConfig = {
     ...existing,
-    name: params.name !== undefined ? params.name : existing.name,
     description: params.description !== undefined ? params.description : existing.description,
-    systemPrompt: params.systemPrompt !== undefined ? params.systemPrompt : existing.systemPrompt,
+    soul: params.soul !== undefined ? params.soul : existing.soul,
+    topology: params.topology !== undefined ? params.topology : existing.topology,
     model: params.model !== undefined ? params.model : existing.model,
-    tools: params.tools !== undefined ? params.tools : existing.tools,
+    max_iterations: params.max_iterations !== undefined ? params.max_iterations : existing.max_iterations,
     skills: params.skills !== undefined ? params.skills : existing.skills,
+    handoffs: params.handoffs !== undefined ? params.handoffs : existing.handoffs,
     updatedAt: now,
   }
 
   await writeAgent(updated)
-  return { agent: updated }
 }
 
 /**
- * deleteAgent → 删除 Agent
+ * deleteAgent → 删除 Agent（按 name 查找），返回 void
  */
-async function deleteAgent(params: { id: string }): Promise<{ deleted: boolean }> {
-  if (!params.id) {
-    throw new Error('参数 id 不能为空')
+async function deleteAgent(params: { name: string }): Promise<void> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
+  }
+
+  const existing = await readAgentByName(params.name)
+  if (!existing) {
+    throw new Error(`Agent 不存在: ${params.name}`)
   }
 
   try {
-    await fs.unlink(agentConfigPath(params.id))
+    await fs.unlink(agentConfigPath(existing.id))
     // 同时尝试删除记忆目录（可选，忽略错误）
     try {
-      await fs.rm(agentMemoryDir(params.id), { recursive: true, force: true })
+      await fs.rm(agentMemoryDir(existing.id), { recursive: true, force: true })
     } catch {
       // 记忆目录删除失败不影响主要操作
     }
-    return { deleted: true }
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { deleted: false }
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw err
     }
-    throw err
   }
 }
 
 /**
- * getAgentMemoryStats → 获取 Agent 记忆统计信息
+ * getAgentMemoryStats → 获取 Agent 记忆统计信息（按 name 查找）
  */
-async function getAgentMemoryStats(params: { agentId: string }): Promise<{
-  totalMemories: number
-  oldestAt?: string
-  newestAt?: string
-}> {
-  if (!params.agentId) {
-    throw new Error('参数 agentId 不能为空')
+async function getAgentMemoryStats(params: { name: string }): Promise<AgentMemoryStatsDTO> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
 
-  const memories = await readAgentMemories(params.agentId)
-
-  if (memories.length === 0) {
-    return { totalMemories: 0 }
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
+    throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const sorted = [...memories].sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+  const memories = await readAgentMemories(agent.id)
 
   return {
-    totalMemories: memories.length,
-    oldestAt: sorted[0].createdAt,
-    newestAt: sorted[sorted.length - 1].createdAt,
+    agent: params.name,
+    stats: {
+      short_term_count: memories.length,
+      long_term_count: 0,
+      episodic_count: 0,
+    },
   }
 }
 
@@ -319,19 +444,24 @@ async function getAgentMemoryStats(params: { agentId: string }): Promise<{
  * searchAgentMemory → 全文搜索 Agent 记忆（简单 contains 实现）
  */
 async function searchAgentMemory(params: {
-  agentId: string
-  query: string
+  name: string
+  q: string
   limit?: number
-}): Promise<{ memories: AgentMemoryEntry[] }> {
-  if (!params.agentId) {
-    throw new Error('参数 agentId 不能为空')
+}): Promise<{ agent: string; query: string; results: AgentMemoryEntryDTO[] }> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
-  if (!params.query) {
-    throw new Error('参数 query 不能为空')
+  if (!params.q) {
+    throw new Error('参数 q 不能为空')
   }
 
-  const memories = await readAgentMemories(params.agentId)
-  const queryLower = params.query.toLowerCase()
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
+    throw new Error(`Agent 不存在: ${params.name}`)
+  }
+
+  const memories = await readAgentMemories(agent.id)
+  const queryLower = params.q.toLowerCase()
 
   let results = memories.filter(m => m.content.toLowerCase().includes(queryLower))
 
@@ -341,21 +471,30 @@ async function searchAgentMemory(params: {
   const limit = params.limit && params.limit > 0 ? params.limit : 20
   results = results.slice(0, limit)
 
-  return { memories: results }
+  return {
+    agent: params.name,
+    query: params.q,
+    results: results.map(toMemoryEntryDTO),
+  }
 }
 
 /**
  * getAgentMemoryRecent → 获取最新记忆列表
  */
 async function getAgentMemoryRecent(params: {
-  agentId: string
+  name: string
   limit?: number
-}): Promise<{ memories: AgentMemoryEntry[] }> {
-  if (!params.agentId) {
-    throw new Error('参数 agentId 不能为空')
+}): Promise<{ agent: string; results: AgentMemoryEntryDTO[] }> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
 
-  const memories = await readAgentMemories(params.agentId)
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
+    throw new Error(`Agent 不存在: ${params.name}`)
+  }
+
+  const memories = await readAgentMemories(agent.id)
 
   // 按时间降序排列
   memories.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -363,25 +502,29 @@ async function getAgentMemoryRecent(params: {
   const limit = params.limit && params.limit > 0 ? params.limit : 20
   const results = memories.slice(0, limit)
 
-  return { memories: results }
+  return {
+    agent: params.name,
+    results: results.map(toMemoryEntryDTO),
+  }
 }
 
 /**
- * clearAgentMemory → 清空 Agent 所有记忆
+ * clearAgentMemory → 清空 Agent 所有记忆，返回 void
  */
-async function clearAgentMemory(params: { agentId: string }): Promise<{ cleared: number }> {
-  if (!params.agentId) {
-    throw new Error('参数 agentId 不能为空')
+async function clearAgentMemory(params: { name: string }): Promise<void> {
+  if (!params.name) {
+    throw new Error('参数 name 不能为空')
   }
 
-  const memories = await readAgentMemories(params.agentId)
-  const count = memories.length
-
-  if (count > 0) {
-    await writeAgentMemories(params.agentId, [])
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
+    throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  return { cleared: count }
+  const memories = await readAgentMemories(agent.id)
+  if (memories.length > 0) {
+    await writeAgentMemories(agent.id, [])
+  }
 }
 
 // ─── 注册函数 ─────────────────────────────────────────────────────────────────
@@ -395,53 +538,49 @@ export function registerAgentHandlers(server: ServerLike): void {
   })
 
   server.registerMethod('getAgent', async (params: unknown) => {
-    return getAgent(params as { id: string })
+    return getAgent(params as { name: string })
   })
 
   server.registerMethod('createAgent', async (params: unknown) => {
-    return createAgent(
-      params as {
-        name: string
-        description?: string
-        systemPrompt?: string
-        model?: string
-        tools?: string[]
-        skills?: string[]
-      },
-    )
+    return createAgent(params as {
+      name: string
+      soul?: string
+      description?: string
+      skills?: string[]
+      handoffs?: string[]
+    })
   })
 
   server.registerMethod('updateAgent', async (params: unknown) => {
-    return updateAgent(
-      params as {
-        id: string
-        name?: string
-        description?: string
-        systemPrompt?: string
-        model?: string
-        tools?: string[]
-        skills?: string[]
-      },
-    )
+    return updateAgent(params as {
+      name: string
+      soul?: string
+      description?: string
+      skills?: string[]
+      handoffs?: string[]
+      model?: string
+      max_iterations?: number
+      topology?: string
+    })
   })
 
   server.registerMethod('deleteAgent', async (params: unknown) => {
-    return deleteAgent(params as { id: string })
+    return deleteAgent(params as { name: string })
   })
 
   server.registerMethod('getAgentMemoryStats', async (params: unknown) => {
-    return getAgentMemoryStats(params as { agentId: string })
+    return getAgentMemoryStats(params as { name: string })
   })
 
   server.registerMethod('searchAgentMemory', async (params: unknown) => {
-    return searchAgentMemory(params as { agentId: string; query: string; limit?: number })
+    return searchAgentMemory(params as { name: string; q: string; limit?: number })
   })
 
   server.registerMethod('getAgentMemoryRecent', async (params: unknown) => {
-    return getAgentMemoryRecent(params as { agentId: string; limit?: number })
+    return getAgentMemoryRecent(params as { name: string; limit?: number })
   })
 
   server.registerMethod('clearAgentMemory', async (params: unknown) => {
-    return clearAgentMemory(params as { agentId: string })
+    return clearAgentMemory(params as { name: string })
   })
 }
