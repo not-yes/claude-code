@@ -1,6 +1,6 @@
 /**
  * Custom ESLint rules placeholder plugin
- * 
+ *
  * This plugin provides stub definitions for custom rules referenced
  * throughout the codebase via eslint-disable comments. The actual rule
  * implementations are not present, so we create no-op rules to prevent
