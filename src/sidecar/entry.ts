@@ -107,16 +107,30 @@ function readConfig(): {
 // ─── 配置验证 ─────────────────────────────────────────────────────────────────
 
 /**
+ * 配置验证结果
+ */
+interface ConfigValidation {
+  hasApiKey: boolean
+  warnings: string[]
+  errors: string[]
+}
+
+/**
  * 验证 Sidecar 启动所需的关键配置。
  *
- * 仅记录警告/错误日志，不阻塞启动流程。
- * API key 缺失时不退出进程，让后续的 API 调用自然失败并返回明确错误。
+ * 返回结构化验证结果，供调用方决定是否通过 JSON-RPC notification 通知前端。
+ * 不阻塞启动流程：API key 缺失时让后续 API 调用自然失败并返回明确错误。
  */
-function validateConfig(agentConfig: AgentCoreConfig): void {
+function validateConfig(agentConfig: AgentCoreConfig): ConfigValidation {
+  const result: ConfigValidation = { hasApiKey: true, warnings: [], errors: [] }
+
   // 验证 API Key
   const apiKey = agentConfig.apiKey
   if (!apiKey) {
-    log('ERROR', 'No API key found. Set SIDECAR_API_KEY or ANTHROPIC_API_KEY environment variable.')
+    result.hasApiKey = false
+    const msg = 'No API key found. Set SIDECAR_API_KEY or ANTHROPIC_API_KEY environment variable.'
+    result.errors.push(msg)
+    log('ERROR', msg)
     log('WARN', 'Sidecar will start but API calls will fail without a valid API key.')
   } else {
     // 仅打印 key 前 8 位，避免泄露
@@ -127,7 +141,9 @@ function validateConfig(agentConfig: AgentCoreConfig): void {
   // 验证工作目录
   const cwd = agentConfig.cwd
   if (!cwd) {
-    log('WARN', 'No working directory specified. Falling back to process.cwd().')
+    const msg = 'No working directory specified. Falling back to process.cwd().'
+    result.warnings.push(msg)
+    log('WARN', msg)
   } else {
     log('INFO', `Working directory: ${cwd}`)
   }
@@ -135,17 +151,23 @@ function validateConfig(agentConfig: AgentCoreConfig): void {
   // 验证权限模式
   const permMode = agentConfig.defaultPermissionMode
   if (permMode === 'auto-approve') {
-    log('WARN', 'Permission mode is auto-approve: all tool calls will be approved without prompting.')
+    const msg = 'Permission mode is auto-approve: all tool calls will be approved without prompting.'
+    result.warnings.push(msg)
+    log('WARN', msg)
   }
 
   // 验证预算上限
   if (agentConfig.maxBudgetUsd !== undefined) {
     if (isNaN(agentConfig.maxBudgetUsd) || agentConfig.maxBudgetUsd <= 0) {
-      log('WARN', `Invalid maxBudgetUsd value: ${agentConfig.maxBudgetUsd}. Budget limit will not be enforced.`)
+      const msg = `Invalid maxBudgetUsd value: ${agentConfig.maxBudgetUsd}. Budget limit will not be enforced.`
+      result.warnings.push(msg)
+      log('WARN', msg)
     } else {
       log('INFO', `Max budget: $${agentConfig.maxBudgetUsd} USD`)
     }
   }
+
+  return result
 }
 
 // ─── 主启动函数 ────────────────────────────────────────────────────────────────
@@ -167,7 +189,7 @@ async function main(): Promise<void> {
   log('INFO', `调试日志: ${debug}`)
 
   // 1.5 配置验证（在 AgentCore 初始化之前校验关键参数）
-  validateConfig(agentConfig)
+  const configValidation = validateConfig(agentConfig)
 
   // 启用配置读取（必须在 AgentCore 初始化之前）
   enableConfigs()
@@ -276,6 +298,7 @@ async function main(): Promise<void> {
 
   // 输出就绪信号到 stdout（Tauri host 等待此消息确认 sidecar 已就绪）
   // 格式：JSON-RPC notification（不带 id）
+  // 同时携带配置验证结果，让前端在启动阶段即可感知 API key 缺失等致命错误
   const readyNotification = JSON.stringify({
     jsonrpc: '2.0',
     method: '$/ready',
@@ -283,6 +306,9 @@ async function main(): Promise<void> {
       version: '1.0.0',
       cwd: agentConfig.cwd,
       permissionMode: agentConfig.defaultPermissionMode,
+      hasApiKey: configValidation.hasApiKey,
+      configErrors: configValidation.errors,
+      configWarnings: configValidation.warnings,
     },
   })
   process.stdout.write(readyNotification + '\n')
