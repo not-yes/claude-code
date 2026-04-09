@@ -143,7 +143,10 @@ export class PermissionBridge {
       granted: result.granted,
       remember: result.remember,
       denyReason: result.denyReason,
-    } as PermissionDecision)
+      decisionReason: result.granted
+        ? { type: 'user', action: 'approved' }
+        : { type: 'user', action: 'denied', reason: result.denyReason ?? 'User denied' },
+    })
     return true
   }
 

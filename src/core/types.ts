@@ -131,6 +131,17 @@ export interface PermissionDecision {
   remember?: boolean
   /** 自定义拒绝理由（显示给模型） */
   denyReason?: string
+  /**
+   * 决策来源与原因（用于审计和日志追踪）。
+   * type: 决策来源（如 'user' | 'system' | 'policy'）
+   * action: 具体动作（如 'approved' | 'denied'）
+   * reason: 可选的原因描述
+   */
+  decisionReason?: {
+    type: string
+    action: string
+    reason?: string
+  }
 }
 
 // ─── 权限模式 ──────────────────────────────────────────────────────────────────

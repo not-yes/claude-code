@@ -18,7 +18,6 @@
  */
 
 import { promises as fs } from 'fs'
-import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 import { join } from 'path'
 import {
@@ -89,7 +88,7 @@ interface RemoteSkillItemDTO {
 // ─── 服务接口 ─────────────────────────────────────────────────────────────────
 
 interface ServerLike {
-  registerMethod(name: string, handler: (params: any) => Promise<any>): void
+  registerMethod(name: string, handler: (params: unknown) => Promise<unknown>): void
 }
 
 // ─── 缓存 ─────────────────────────────────────────────────────────────────────
@@ -115,10 +114,10 @@ export function clearSkillsCache(): void {
 function commandToSkill(cmd: Command): Skill {
   const now = new Date().toISOString()
   const pc = cmd as PromptCommand & CommandBase
-  
+
   // 从 source 和 loadedFrom 推断 category
   const category = inferCategory(cmd)
-  
+
   return {
     id: cmd.name,
     name: cmd.name,
@@ -166,7 +165,7 @@ function inferSource(cmd: Command): string {
  */
 async function loadAllSkills(): Promise<Skill[]> {
   const cwd = getCwdState() || process.cwd()
-  
+
   try {
     // 并行加载所有来源的 skills
     const [
@@ -227,16 +226,16 @@ async function loadAllSkills(): Promise<Skill[]> {
  */
 async function readAllSkills(): Promise<Skill[]> {
   const now = Date.now()
-  
+
   // 检查缓存
   if (skillsCache && (now - skillsCacheTime) < SKILLS_CACHE_TTL) {
     return skillsCache
   }
-  
+
   // 加载 skills
   skillsCache = await loadAllSkills()
   skillsCacheTime = now
-  
+
   return skillsCache
 }
 
@@ -320,20 +319,20 @@ async function getSkill(params: { name: string }): Promise<SkillDetailDTO> {
   if (!params.name) {
     throw new Error('参数 name 不能为空')
   }
-  
+
   const skill = await readSkillByName(params.name)
   if (!skill) {
     throw new Error(`技能不存在: ${params.name}`)
   }
-  
+
   // 如果有 file_path 且是目录格式，尝试读取 SKILL.md 内容
   let guidance = skill.guidance
   if (skill.file_path && !guidance) {
     try {
-      const skillMdPath = skill.file_path.endsWith('.md') 
-        ? skill.file_path 
+      const skillMdPath = skill.file_path.endsWith('.md')
+        ? skill.file_path
         : join(skill.file_path, 'SKILL.md')
-      
+
       const content = await fs.readFile(skillMdPath, 'utf-8')
       // 解析 frontmatter 后的 body 部分
       const bodyMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/)
@@ -343,7 +342,7 @@ async function getSkill(params: { name: string }): Promise<SkillDetailDTO> {
       guidance = ''
     }
   }
-  
+
   return {
     ...toSkillDetail(skill),
     guidance,
@@ -429,7 +428,7 @@ async function installSkill(params: {
   }
 
   // 查找已有技能
-  let existing = await readSkillByName(params.skill_id)
+  const existing = await readSkillByName(params.skill_id)
 
   if (!existing) {
     throw new Error(`技能不存在: ${params.skill_id}`)
@@ -479,14 +478,14 @@ async function updateSkill(params: {
 
       // 读取现有内容
       const content = await fs.readFile(skillMdPath, 'utf-8')
-      
+
       // 解析并更新 frontmatter
       const frontmatterMatch = content.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n)([\s\S]*)$/)
-      
+
       if (frontmatterMatch) {
         // 有 frontmatter，更新它
         let [, frontmatter, body] = frontmatterMatch
-        
+
         // 更新 frontmatter 中的字段
         if (params.description !== undefined) {
           frontmatter = frontmatter.replace(
@@ -500,12 +499,12 @@ async function updateSkill(params: {
             `$1${params.category}`
           )
         }
-        
+
         // 更新 body（guidance）
         if (params.guidance !== undefined) {
           body = params.guidance
         }
-        
+
         await fs.writeFile(skillMdPath, frontmatter + body, 'utf-8')
       } else {
         // 没有 frontmatter，创建新的
@@ -519,7 +518,7 @@ async function updateSkill(params: {
           '',
           params.guidance ?? existing.guidance,
         ].join('\n')
-        
+
         await fs.writeFile(skillMdPath, newContent, 'utf-8')
       }
     } catch (err) {
@@ -566,7 +565,7 @@ async function deleteSkill(params: { name: string }): Promise<void> {
       const targetPath = existing.file_path.endsWith('SKILL.md')
         ? existing.file_path.replace(/SKILL\.md$/, '')
         : existing.file_path
-      
+
       // 检查是否是目录
       const stat = await fs.stat(targetPath)
       if (stat.isDirectory()) {

@@ -15,6 +15,8 @@
  *   SIDECAR_MODE=true bun run src/sidecar/entry.ts
  */
 
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+
 // ─── MACRO 垫片 ────────────────────────────────────────────────────────────────
 // MACRO 是 bun:bundle 的编译时宏，在 sidecar 编译时需要提供垫片
 // @ts-ignore - 全局声明
@@ -31,8 +33,7 @@ globalThis.MACRO = globalThis.MACRO ?? {
 
 // ─── bun:bundle feature 垫片 ────────────────────────────────────────────────────
 // feature() 是 bun:bundle 的条件编译函数
-// @ts-ignore - 全局声明
-globalThis.feature = globalThis.feature ?? ((name: string) => {
+globalThis.feature = globalThis.feature ?? ((_name: string) => {
   // sidecar 模式禁用所有特性
   return false
 })
