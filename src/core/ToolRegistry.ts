@@ -58,6 +58,8 @@ export class ToolRegistry {
   private tools: Map<string, any>
   /** 别名映射（alias → canonical name） */
   private aliases: Map<string, string>
+  /** 工具描述缓存（name → description string） */
+  private toolDescriptions: Map<string, string> = new Map()
 
   constructor() {
     this.tools = new Map()
@@ -201,6 +203,40 @@ export class ToolRegistry {
   clear(): void {
     this.tools.clear()
     this.aliases.clear()
+    this.toolDescriptions.clear()
+  }
+
+  /**
+   * 预加载所有工具的描述并缓存。
+   * 在 fromBuiltins/fromSidecarSafeBuiltins 完成后调用，供 listTools() 同步读取。
+   *
+   * 工具描述来源（按优先级）：
+   *   1. tool.prompt() —— async 方法（如果存在）
+   *   2. tool.description —— string 字段（如果存在）
+   */
+  async preloadToolDescriptions(): Promise<void> {
+    for (const [name, tool] of this.tools.entries()) {
+      try {
+        if (typeof tool.prompt === 'function') {
+          const desc = await tool.prompt()
+          this.toolDescriptions.set(name, typeof desc === 'string' ? desc : '')
+        } else if (typeof tool.description === 'string') {
+          this.toolDescriptions.set(name, tool.description)
+        } else {
+          this.toolDescriptions.set(name, '')
+        }
+      } catch {
+        this.toolDescriptions.set(name, '')
+      }
+    }
+  }
+
+  /**
+   * 获取工具的缓存描述。
+   * 需先调用 preloadToolDescriptions() 才有返回値。
+   */
+  getCachedDescription(toolName: string): string | undefined {
+    return this.toolDescriptions.get(toolName)
   }
 
   // ─── 静态工厂方法 ─────────────────────────────────────────────────────
@@ -303,8 +339,10 @@ export class ToolRegistry {
       'PermissionPromptTool',  // 内部权限 UI 工具
     ])
 
-    return ToolRegistry.fromBuiltins({
+    const registry = await ToolRegistry.fromBuiltins({
       excludeTools: [...uiOnlyTools],
     })
+    await registry.preloadToolDescriptions()
+    return registry
   }
 }

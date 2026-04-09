@@ -454,6 +454,11 @@ export class StateManager {
       effortValue: undefined,
       advisorModel: undefined,
       fastMode: undefined,
+      // QueryEngine 运行时访问的必要字段
+      sessionId: this.coreState.sessionId,
+      modelUsage: {},
+      getTotalCost: () => this.coreState.totalCostUsd ?? 0,
+      getInMemoryErrors: () => [],
     }
   }
 }

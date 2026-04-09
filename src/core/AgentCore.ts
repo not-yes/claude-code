@@ -27,10 +27,14 @@ import type {
   SessionParams,
   ToolInfo,
 } from './types.js'
+import type { Message } from '../types/message.js'
 import type { StateManager } from './StateManager.js'
 import type { ToolRegistry } from './ToolRegistry.js'
 import type { PermissionEngine } from './PermissionEngine.js'
 import type { SessionStorage } from '../sidecar/storage/sessionStorage.js'
+import { promises as fs } from 'fs'
+import { join } from 'path'
+import { homedir } from 'os'
 
 // ─── AgentCore 接口 ────────────────────────────────────────────────────────────
 
@@ -98,6 +102,33 @@ export interface AgentCore {
    */
   clearSession(): Promise<void>
 
+  /**
+   * 重置多轮对话的消息历史，开始新的会话上下文。
+   */
+  resetConversation(): void
+
+  /**
+   * 删除指定会话（从持久化层移除）。
+   * 若删除的是当前活跃会话，同时清空消息历史。
+   */
+  deleteSession(sessionId: string): Promise<boolean>
+
+  /**
+   * 恢复消息历史（用于从持久化层加载会话消息）。
+   */
+  restoreMessages(messages: any[]): void
+
+  /**
+   * 使 agent 缓存失效（下次 execute 时重新加载）。
+   * @param agentId 指定 agent ID，不传则清除所有
+   */
+  invalidateAgentCache(agentId?: string): void
+
+  /**
+   * 使 skill 缓存失效（下次加载时重新读取）。
+   */
+  invalidateSkillCache(): void
+
   // ─── 工具管理 ────────────────────────────────────────────────────────────
 
   /**
@@ -127,6 +158,16 @@ export interface AgentCore {
   onPermissionRequest?: (
     request: PermissionRequest,
   ) => Promise<PermissionDecision>
+
+  /**
+   * 注入 MCP 客户端列表（供外部在 initialize 后动态设置）。
+   */
+  setMcpClients(clients: any[]): void
+
+  /**
+   * 获取当前 MCP 客户端列表。
+   */
+  getMcpClients(): any[]
 
   // ─── 状态访问 ────────────────────────────────────────────────────────────
 
@@ -190,6 +231,15 @@ export function toInternalPermissionMode(
 
 /**
  * 将内部 PermissionMode 字符串映射回 CorePermissionMode。
+ *
+ * 内部模式说明：
+ *   - 'default'          → 'interactive'  默认交互模式
+ *   - 'acceptEdits'      → 'auto-approve'  自动接受编辑操作
+ *   - 'bypassPermissions'→ 'auto-approve'  绕过所有权限检查（如 bypassPermissions 模式）
+ *   - 'auto'             → 'auto-approve'  自动批准模式（等同于 auto-approve）
+ *   - 'dontAsk'          → 'deny-all'      不询问用户直接拒绝（非交互式拒绝）
+ *   - 'plan'             → 'plan-only'     仅计划模式、只读操作
+ *   - 'bubble'           → 'interactive'  冒泡模式本质上是交互式（向上层冒泡权限请求）
  */
 export function toCorePermissionMode(
   internalMode: string,
@@ -226,9 +276,14 @@ class AgentCoreImpl implements AgentCore {
   private sessionStorage: SessionStorage | null = null
   // 当前活跃会话 ID（用于消息追加）
   private activeSessionId: string | null = null
+  // MCP 客户端列表（可通过 setMcpClients 注入）
+  private mcpClients: any[] = []
 
   // 懒加载 QueryEngine 模块（避免在 import 时触发 React/Ink 副作用）
   private queryEngineModule: typeof import('../QueryEngine.js') | null = null
+
+  // 多轮对话消息历史（跨 execute() 调用保持）
+  private messageHistory: Message[] = []
 
   onPermissionRequest?: (request: PermissionRequest) => Promise<PermissionDecision>
 
@@ -239,6 +294,17 @@ class AgentCoreImpl implements AgentCore {
   }
 
   // ─── 生命周期 ──────────────────────────────────────────────────────────
+
+  /**
+   * 注入 MCP 客户端列表（供外部在 initialize 后动态设置）
+   */
+  setMcpClients(clients: any[]): void {
+    this.mcpClients = clients
+  }
+
+  getMcpClients(): any[] {
+    return this.mcpClients ?? []
+  }
 
   async initialize(): Promise<void> {
     if (this.isInitialized) return
@@ -255,6 +321,11 @@ class AgentCoreImpl implements AgentCore {
       permissionMode: this.config.defaultPermissionMode ?? 'interactive',
     }))
 
+    // 从 config 读取预置的 mcpClients（如果提供）
+    if ((this.config as any).mcpClients) {
+      this.mcpClients = (this.config as any).mcpClients
+    }
+
     // 从 SessionStorage 加载已有会话（预热索引，失败不阻塞启动）
     if (this.sessionStorage) {
       try {
@@ -265,6 +336,7 @@ class AgentCoreImpl implements AgentCore {
     }
 
     this.isInitialized = true
+    this.log('info', 'AgentCore initialized', { sessionId: this.deps.stateManager.getState().sessionId, cwd: this.config.cwd })
   }
 
   async shutdown(): Promise<void> {
@@ -290,11 +362,26 @@ class AgentCoreImpl implements AgentCore {
     // 创建新的 AbortController（每次执行独立）
     this.abortController = new AbortController()
 
-    // 持久化用户输入消息
+    // 如果指定了 agentId，加载 agent 的 skills 并 prepend 到消息
+    if (options?.agentId) {
+      const skillContent = await this.loadAgentSkills(options.agentId)
+      if (skillContent) {
+        content = `${skillContent}\n\n用户请求: ${content}`
+      }
+    }
+
+    // 持久化用户输入消息（使用 SDK 标准格式）
     if (this.sessionStorage && this.activeSessionId) {
+      const { randomUUID } = await import('crypto')
       const userMsg = {
-        role: 'user' as const,
-        content,
+        type: 'user' as const,
+        message: {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: content }],
+          uuid: randomUUID(),
+        },
+        session_id: this.activeSessionId ?? '',
+        parent_tool_use_id: null,
         created_at: new Date().toISOString(),
       }
       await this.sessionStorage.appendMessage(this.activeSessionId, userMsg).catch(() => undefined)
@@ -320,11 +407,12 @@ class AgentCoreImpl implements AgentCore {
         cwd: this.config.cwd,
         tools,
         commands: [],
-        mcpClients: [],
+        mcpClients: this.mcpClients,
         agents: [],
         canUseTool,
         getAppState,
         setAppState,
+        initialMessages: this.messageHistory,
         readFileCache: stateManager.getFileStateCache(),
         customSystemPrompt: options?.systemPrompt,
         appendSystemPrompt: options?.appendSystemPrompt,
@@ -340,23 +428,62 @@ class AgentCoreImpl implements AgentCore {
 
       // 迭代 SDK 消息，转换为 SidecarStreamEvent
       let assistantTextBuffer = ''
+      let lastStopReason = 'end_turn'
+      // 收集 result 消息中的统计数据
+      let executionUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number } | null = null
+      let executionCostUsd = 0
       for await (const sdkMsg of engine.submitMessage(content, {
         uuid: options?.requestId,
       })) {
-        const event = this.mapSDKMessageToStreamEvent(sdkMsg)
-        if (event) {
-          // 累积 assistant 文本用于持久化
-          if (event.type === 'text' && !event.isThinking) {
-            assistantTextBuffer += event.content
+        // 捕获 result 消息中的 usage 和 cost 数据
+        if (sdkMsg.type === 'result') {
+          lastStopReason = (sdkMsg as any).stop_reason ?? lastStopReason
+          if ((sdkMsg as any).usage) {
+            executionUsage = (sdkMsg as any).usage
           }
-          yield event
+          if (typeof (sdkMsg as any).total_cost_usd === 'number') {
+            executionCostUsd = (sdkMsg as any).total_cost_usd
+          }
+        }
+
+        const events = this.mapSDKMessageToStreamEvent(sdkMsg)
+        for (const event of events) {
+          if (event) {
+            // 累积 assistant 文本用于持久化
+            if (event.type === 'text' && !event.isThinking) {
+              assistantTextBuffer += event.content
+            }
+            yield event
+          }
         }
       }
-      // 持久化 assistant 回复（整轮合并为一条消息）
+
+      // 将本次执行的统计数据同步到 StateManager
+      if (executionUsage || executionCostUsd > 0) {
+        stateManager.addUsage({
+          inputTokens: executionUsage?.inputTokens ?? 0,
+          outputTokens: executionUsage?.outputTokens ?? 0,
+          cacheReadTokens: executionUsage?.cacheReadTokens ?? 0,
+          cacheCreationTokens: executionUsage?.cacheCreationTokens ?? 0,
+          costUsd: executionCostUsd,
+        })
+      }
+
+      // 更新消息历史（保留本轮产生的所有新消息，供下轮 initialMessages 使用）
+      this.messageHistory = engine.getMessages() as Message[]
+
+      // 持久化 assistant 回复（整轮合并为一条消息，使用 SDK 标准格式）
       if (this.sessionStorage && this.activeSessionId && assistantTextBuffer) {
+        const { randomUUID: randomUUIDAssistant } = await import('crypto')
         const assistantMsg = {
-          role: 'assistant' as const,
-          content: assistantTextBuffer,
+          type: 'assistant' as const,
+          message: {
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: assistantTextBuffer }],
+            uuid: randomUUIDAssistant(),
+          },
+          session_id: this.activeSessionId ?? '',
+          parent_tool_use_id: null,
           created_at: new Date().toISOString(),
         }
         await this.sessionStorage
@@ -368,7 +495,7 @@ class AgentCoreImpl implements AgentCore {
       const currentState = stateManager.getState()
       yield {
         type: 'complete',
-        reason: 'completed',
+        reason: lastStopReason,
         usage: {
           inputTokens: currentState.usage.inputTokens,
           outputTokens: currentState.usage.outputTokens,
@@ -377,6 +504,7 @@ class AgentCoreImpl implements AgentCore {
         },
       }
     } catch (error) {
+      this.log('error', 'Execute failed', { error: error instanceof Error ? error.message : String(error) })
       yield {
         type: 'error',
         message: error instanceof Error ? error.message : String(error),
@@ -388,7 +516,7 @@ class AgentCoreImpl implements AgentCore {
 
   abort(): void {
     if (this.abortController) {
-      this.abortController.abort('user_abort')
+      this.abortController.abort(new DOMException('User aborted the operation', 'AbortError'))
       this.abortController = null
     }
   }
@@ -497,11 +625,57 @@ class AgentCoreImpl implements AgentCore {
       ...prev,
       sessionId: randomUUID(),
     }))
+    // 清空多轮对话消息历史
+    this.messageHistory = []
     // 持久化层：删除当前活跃会话
     if (this.sessionStorage && this.activeSessionId) {
       await this.sessionStorage.deleteSession(this.activeSessionId).catch(() => undefined)
     }
     this.activeSessionId = null
+  }
+
+  /**
+   * Reset conversation history for a new session
+   */
+  resetConversation(): void {
+    this.messageHistory = []
+  }
+
+  async deleteSession(sessionId: string): Promise<boolean> {
+    try {
+      const sessions = await this.listSessions()
+      const session = sessions.find((s: any) => s.id === sessionId || s.sessionId === sessionId)
+      if (!session) return false
+
+      // 如果删除的是当前活跃会话，清空消息历史
+      if (this.activeSessionId === sessionId) {
+        this.messageHistory = []
+        await this.clearSession()
+      } else if (this.sessionStorage) {
+        // 删除非当前会话直接从持久化层移除
+        await this.sessionStorage.deleteSession(sessionId).catch(() => undefined)
+      }
+
+      this.log('info', 'Session deleted', { sessionId })
+      return true
+    } catch (err) {
+      this.log('error', 'Failed to delete session', { sessionId, error: String(err) })
+      return false
+    }
+  }
+
+  restoreMessages(messages: any[]): void {
+    this.messageHistory = [...messages]
+    this.log('info', 'Messages restored', { count: messages.length })
+  }
+
+  invalidateAgentCache(agentId?: string): void {
+    // 清除内部 agent 加载缓存，下次 execute 时会重新加载
+    this.log('debug', 'Agent cache invalidated', { agentId: agentId ?? 'all' })
+  }
+
+  invalidateSkillCache(): void {
+    this.log('debug', 'Skill cache invalidated')
   }
 
   // ─── 工具管理 ──────────────────────────────────────────────────────────
@@ -510,7 +684,7 @@ class AgentCoreImpl implements AgentCore {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return this.deps.toolRegistry.list().map((tool: any) => ({
       name: tool.name,
-      description: '',  // Tool.prompt() 是 async 的，此处返回空字符串
+      description: this.deps.toolRegistry.getCachedDescription(tool.name) ?? '',
       isReadOnly: tool.isReadOnly({}),
       isMcp: tool.isMcp ?? false,
       mcpInfo: tool.mcpInfo,
@@ -545,48 +719,169 @@ class AgentCoreImpl implements AgentCore {
    *      - 'deny-all': 直接拒绝
    *      - 'plan-only': 对写操作拒绝，读操作允许
    */
+
+  /**
+   * 加载指定 agent 的 skills 内容
+   * 读取 ~/.claude/agents/{agentId}.json 获取 skill 列表，
+   * 然后读取 ~/.claude/skills/{skillName}/SKILL.md 获取内容
+   */
+  private async loadAgentSkills(agentId: string): Promise<string> {
+    try {
+      const agentConfigPath = join(homedir(), '.claude', 'agents', `${agentId}.json`)
+      const agentConfigContent = await fs.readFile(agentConfigPath, 'utf-8')
+      const agentConfig = JSON.parse(agentConfigContent)
+
+      if (!agentConfig.skills || !Array.isArray(agentConfig.skills) || agentConfig.skills.length === 0) {
+        return ''
+      }
+
+      const skillsDir = join(homedir(), '.claude', 'skills')
+      const skillContents: string[] = []
+
+      for (const skillName of agentConfig.skills) {
+        // 尝试多种可能的 skill 路径格式
+        const possiblePaths = [
+          join(skillsDir, skillName, 'SKILL.md'),
+          join(skillsDir, skillName.toLowerCase(), 'SKILL.md'),
+          join(skillsDir, skillName.replace(/ /g, '-').toLowerCase(), 'SKILL.md'),
+        ]
+
+        for (const skillPath of possiblePaths) {
+          try {
+            const content = await fs.readFile(skillPath, 'utf-8')
+            // 提取 SKILL.md 中的内容（跳过 frontmatter）
+            const contentWithoutFrontmatter = content.replace(/^---[\s\S]*?---\n/, '')
+            skillContents.push(`## Skill: ${skillName}\n\n${contentWithoutFrontmatter}`)
+            break
+          } catch {
+            // 路径不存在，继续尝试下一个
+          }
+        }
+      }
+
+      return skillContents.length > 0
+        ? `以下是 ${agentConfig.name} Agent 使用的 Skills 参考信息:\n\n${skillContents.join('\n\n---\n\n')}`
+        : ''
+    } catch (error) {
+      // 加载失败不影响执行，只是没有 skill 内容
+      this.log('warn', '加载 agent skills 失败', { agentId, error: String(error) })
+      return ''
+    }
+  }
+
   private buildCanUseToolFn(permissionEngine: PermissionEngine) {
     // 返回符合 CanUseToolFn 签名的函数
     // 类型使用 any 避免循环引用（CanUseToolFn 引用了 Tool/ToolUseContext 等内部类型）
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return async (tool: any, input: any, _context: any): Promise<any> => {
+    return async (
+      tool: any,
+      input: any,
+      toolUseContext: any,
+      _assistantMessage: any,
+      toolUseID: string,
+      forceDecision?: any,
+    ): Promise<any> => {
       const toolName: string = tool.name
-      const currentState = this.deps.stateManager.getState()
+
+      // 0. 如果存在 forceDecision，直接返回
+      if (forceDecision) {
+        return forceDecision
+      }
+
+      // 尝试从 toolUseContext 获取更完整的状态
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let appState: any = null
+      try {
+        if (toolUseContext?.getAppState) {
+          appState = toolUseContext.getAppState()
+        }
+      } catch {
+        // fallback to stateManager
+      }
+
+      const currentState = appState ?? this.deps.stateManager.getState()
       const permMode = currentState.permissionMode
 
       // 1. 询问 PermissionEngine（基于规则的自动决策）
       const engineDecision = permissionEngine.evaluate(toolName, input)
       if (engineDecision !== null) {
+        const behavior = engineDecision.granted ? 'allow' : 'deny'
+        this.log('debug', 'Permission decision (engine rule)', { toolName, behavior, permMode })
         if (engineDecision.granted) {
-          return { behavior: 'allow', updatedInput: input }
+          return {
+            behavior: 'allow',
+            updatedInput: input,
+            toolUseID,
+            decisionReason: {
+              type: 'rule',
+              ruleName: 'core-permission-engine',
+              ruleDescription: `Permission mode: ${permMode}`,
+            },
+          }
         } else {
           return {
             behavior: 'deny',
             message: engineDecision.denyReason ?? `工具 ${toolName} 被权限规则拒绝`,
+            toolUseID,
+            decisionReason: {
+              type: 'rule',
+              ruleName: 'core-permission-engine-deny',
+              ruleDescription: (engineDecision as any).denyReason || `Denied by permission mode: ${permMode}`,
+            },
           }
         }
       }
 
       // 2. 根据权限模式决定
+      this.log('debug', 'Permission decision (mode-based)', { toolName, permMode })
       switch (permMode) {
         case 'auto-approve':
-          return { behavior: 'allow', updatedInput: input }
+          return {
+            behavior: 'allow',
+            updatedInput: input,
+            toolUseID,
+            decisionReason: {
+              type: 'rule',
+              ruleName: 'core-permission-engine',
+              ruleDescription: `Permission mode: ${permMode}`,
+            },
+          }
 
         case 'deny-all':
           return {
             behavior: 'deny',
             message: `当前权限模式（deny-all）拒绝工具 ${toolName} 的执行`,
+            toolUseID,
+            decisionReason: {
+              type: 'rule',
+              ruleName: 'core-permission-engine-deny',
+              ruleDescription: `Denied by permission mode: ${permMode}`,
+            },
           }
 
         case 'plan-only': {
           // plan-only 模式：只读操作允许，写操作拒绝
           const isReadOp = tool.isReadOnly?.(input) ?? false
           if (isReadOp) {
-            return { behavior: 'allow', updatedInput: input }
+            return {
+              behavior: 'allow',
+              updatedInput: input,
+              toolUseID,
+              decisionReason: {
+                type: 'rule',
+                ruleName: 'core-permission-engine',
+                ruleDescription: `Permission mode: ${permMode}`,
+              },
+            }
           }
           return {
             behavior: 'deny',
             message: `计划模式下不允许执行写操作（${toolName}）`,
+            toolUseID,
+            decisionReason: {
+              type: 'rule',
+              ruleName: 'core-permission-engine-deny',
+              ruleDescription: `Denied by permission mode: ${permMode}`,
+            },
           }
         }
 
@@ -595,12 +890,21 @@ class AgentCoreImpl implements AgentCore {
           // 交互模式：调用 onPermissionRequest 回调
           if (!this.onPermissionRequest) {
             // 没有回调时，默认允许（与现有 bypassPermissions 行为对齐）
-            return { behavior: 'allow', updatedInput: input }
+            return {
+              behavior: 'allow',
+              updatedInput: input,
+              toolUseID,
+              decisionReason: {
+                type: 'rule',
+                ruleName: 'core-permission-engine',
+                ruleDescription: `Permission mode: ${permMode}`,
+              },
+            }
           }
 
-          // 构造权限请求
+          // 构造权限请求，使用传入的 toolUseID
           const request: PermissionRequest = {
-            requestId: `${toolName}-${Date.now()}`,
+            requestId: toolUseID,
             tool: toolName,
             action: tool.userFacingName?.(input) ?? toolName,
             path: tool.getPath?.(input),
@@ -615,11 +919,26 @@ class AgentCoreImpl implements AgentCore {
               if (decision.remember) {
                 permissionEngine.remember(toolName, decision)
               }
-              return { behavior: 'allow', updatedInput: input }
+              return {
+                behavior: 'allow',
+                updatedInput: input,
+                toolUseID,
+                decisionReason: {
+                  type: 'rule',
+                  ruleName: 'core-permission-engine',
+                  ruleDescription: `Permission mode: ${permMode}`,
+                },
+              }
             } else {
               return {
                 behavior: 'deny',
                 message: decision.denyReason ?? `用户拒绝了 ${toolName} 的权限请求`,
+                toolUseID,
+                decisionReason: {
+                  type: 'rule',
+                  ruleName: 'core-permission-engine-deny',
+                  ruleDescription: decision.denyReason || `Denied by permission mode: ${permMode}`,
+                },
               }
             }
           } catch {
@@ -627,6 +946,12 @@ class AgentCoreImpl implements AgentCore {
             return {
               behavior: 'deny',
               message: `权限请求处理失败，拒绝工具 ${toolName}`,
+              toolUseID,
+              decisionReason: {
+                type: 'rule',
+                ruleName: 'core-permission-engine-deny',
+                ruleDescription: `Denied by permission mode: ${permMode}`,
+              },
             }
           }
         }
@@ -635,95 +960,139 @@ class AgentCoreImpl implements AgentCore {
   }
 
   /**
-   * 将 QueryEngine 输出的 SDKMessage 映射到 SidecarStreamEvent。
+   * 结构化日志辅助方法。
+   * 仅在关键路径使用，不过度日志。
+   * debug 级别只在 DEBUG 环境变量为真时输出。
+   */
+  private log(level: 'info' | 'warn' | 'error' | 'debug', message: string, data?: Record<string, unknown>): void {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level,
+      component: 'AgentCore',
+      message,
+      ...data,
+    }
+    if (level === 'error') {
+      console.error(JSON.stringify(entry))
+    } else if (level === 'warn') {
+      console.warn(JSON.stringify(entry))
+    } else if (level === 'debug') {
+      // Only log in debug mode
+      if (process.env.DEBUG) {
+        console.log(JSON.stringify(entry))
+      }
+    } else {
+      console.log(JSON.stringify(entry))
+    }
+  }
+
+  /**
+   * 将 QueryEngine 输出的 SDKMessage 映射到 SidecarStreamEvent 数组。
    *
    * SDKMessage 类型定义在 src/entrypoints/agentSdkTypes.ts 中，
    * 包含 assistant、user、result、system 等消息类型。
    *
-   * 返回 null 表示该消息不需要转发给 Sidecar 调用方。
+   * 返回空数组表示该消息不需要转发给 Sidecar 调用方。
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private mapSDKMessageToStreamEvent(sdkMsg: any): SidecarStreamEvent | null {
-    if (!sdkMsg || typeof sdkMsg !== 'object') return null
+  private mapSDKMessageToStreamEvent(sdkMsg: any): (SidecarStreamEvent | null)[] {
+    if (!sdkMsg || typeof sdkMsg !== 'object') return []
 
     const msgType = sdkMsg.type as string
 
     switch (msgType) {
       case 'assistant': {
-        // 助手消息：提取 text 和 tool_use 块
+        // 助手消息：遍历所有 content blocks，每块生成一个事件
         const content = sdkMsg.message?.content
-        if (!Array.isArray(content)) return null
+        if (!Array.isArray(content)) return []
 
-        // 只返回第一个事件（实际消费方会逐条处理）
-        // 完整实现应逐块 yield，此处简化为返回第一个文本块
+        const events: (SidecarStreamEvent | null)[] = []
         for (const block of content) {
           if (block.type === 'text') {
-            return { type: 'text', content: block.text ?? '' }
-          }
-          if (block.type === 'thinking') {
-            return { type: 'text', content: block.thinking ?? '', isThinking: true }
-          }
-          if (block.type === 'tool_use') {
-            return {
+            events.push({ type: 'text', content: block.text ?? '' })
+          } else if (block.type === 'thinking') {
+            events.push({ type: 'text', content: block.thinking ?? '', isThinking: true })
+          } else if (block.type === 'tool_use') {
+            events.push({
               type: 'tool_use',
               id: block.id,
               name: block.name,
               input: block.input ?? {},
-            }
+            })
           }
         }
-        return null
+        return events
       }
 
       case 'user': {
         // 用户消息（通常是工具结果）
         const content = sdkMsg.message?.content
-        if (!Array.isArray(content)) return null
+        if (!Array.isArray(content)) return []
 
+        const events: (SidecarStreamEvent | null)[] = []
         for (const block of content) {
           if (block.type === 'tool_result') {
-            return {
+            // 通过 tool_use_id 在消息历史中查找对应的 tool_use block
+            const toolName = this.findToolNameByUseId(block.tool_use_id) ?? ''
+            events.push({
               type: 'tool_result',
               id: block.tool_use_id,
-              toolName: '',
+              toolName,
               result: block.content,
               isError: block.is_error ?? false,
-            }
+            })
           }
         }
-        return null
+        return events
       }
 
       case 'system': {
         // 系统消息（info/warning/error）
-        return {
+        return [{
           type: 'system_message',
           level: (sdkMsg.level as 'info' | 'warning' | 'error') ?? 'info',
           content: sdkMsg.content ?? '',
-        }
+        }]
       }
 
       case 'result': {
-        // SDK 结果消息（查询完成）
-        return {
-          type: 'complete',
-          reason: sdkMsg.stop_reason ?? 'completed',
-          usage: sdkMsg.usage
-            ? {
-                inputTokens: sdkMsg.usage.input_tokens ?? 0,
-                outputTokens: sdkMsg.usage.output_tokens ?? 0,
-                cacheReadTokens: sdkMsg.usage.cache_read_input_tokens ?? 0,
-                cacheCreationTokens:
-                  sdkMsg.usage.cache_creation_input_tokens ?? 0,
-              }
-            : undefined,
+        // SDK 结果消息（查询完成）—— 已由 execute() 中的 lastStopReason 跟踪处理
+        // 此处不重复生成 complete 事件，避免重复发送
+        return []
+      }
+
+      case 'tool_progress': {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const progressEvent: any = {
+          type: 'tool_progress',
+          toolUseId: (sdkMsg as any).tool_use_id,
+          progress: (sdkMsg as any).progress,
         }
+        return [progressEvent as SidecarStreamEvent]
       }
 
       default:
         // stream_request_start 等内部事件，不转发
-        return null
+        return []
     }
+  }
+
+  /**
+   * 从消息历史中通过 tool_use_id 查找对应的 tool name。
+   * 从后往前搜索，提高查找近期 tool_use 的效率。
+   */
+  private findToolNameByUseId(toolUseId: string): string | null {
+    for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+      const msg = this.messageHistory[i] as any
+      const content = msg?.message?.content ?? msg?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.id === toolUseId) {
+          return block.name
+        }
+      }
+    }
+    return null
   }
 }
 
@@ -772,7 +1141,7 @@ export async function createAgentCore(
   const stateManager =
     depsOverride?.stateManager ?? new StateManager(config)
   const toolRegistry =
-    depsOverride?.toolRegistry ?? new ToolRegistry()
+    depsOverride?.toolRegistry ?? await ToolRegistry.fromSidecarSafeBuiltins()
   const permissionEngine =
     depsOverride?.permissionEngine ?? new PermissionEngine([])
 

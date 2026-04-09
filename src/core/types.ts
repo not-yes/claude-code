@@ -174,6 +174,8 @@ export interface ExecuteOptions {
   enableThinking?: boolean
   /** 请求唯一 ID（用于幂等性控制） */
   requestId?: string
+  /** Agent ID - 加载对应 agent 的 skills 和配置 */
+  agentId?: string
 }
 
 // ─── 会话类型 ──────────────────────────────────────────────────────────────────
@@ -243,6 +245,8 @@ export interface AgentCoreConfig {
   persistSession?: boolean
   /** 额外配置（传递给底层 QueryEngine） */
   maxBudgetUsd?: number
+  /** MCP 客户端列表（可选，通过构造函数或 setMcpClients 注入） */
+  mcpClients?: any[]
 }
 
 // ─── 权限规则（纯数据结构） ────────────────────────────────────────────────────

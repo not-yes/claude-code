@@ -74,6 +74,8 @@ export class PermissionEngine {
    * 对应 src/utils/permissions/permissionRuleParser.ts 中的解析逻辑。
    */
   private matchPattern: ((pattern: string, value: string) => boolean) | null = null
+  /** 懒加载的 picomatch 库实例（用于精确 glob 匹配） */
+  private _picomatch: any = null
 
   constructor(initialRules: CorePermissionRule[] = []) {
     this.rules = [...initialRules]
@@ -323,17 +325,36 @@ export class PermissionEngine {
   }
 
   /**
-   * 简化的 glob 匹配实现。
-   * 支持 '*'（不含路径分隔符）和 '**'（含路径分隔符）。
+   * glob 匹配实现，优先使用 picomatch 库，回退到简化正则实现。
+   * 支持 `{a,b}`、`?`、`[abc]` 等复杂 glob 模式（通过 picomatch）。
    *
    * 完整实现参考 src/utils/permissions/pathValidation.ts 中的 micromatch 调用。
    */
   private globMatch(pattern: string, target: string): boolean {
-    // 转义正则特殊字符，然后替换 glob 语法
+    try {
+      // 懒加载 picomatch（避免启动时影响性能）
+      if (!this._picomatch) {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        this._picomatch = require('picomatch')
+      }
+      return this._picomatch.isMatch(target, pattern)
+    } catch {
+      // picomatch 不可用时，回退到简化正则实现
+      return this.simpleGlobMatch(pattern, target)
+    }
+  }
+
+  /**
+   * 简化的 glob 匹配 fallback 实现。
+   * 支持 '*'（不含路径分隔符）、'**'（含路径分隔符）、'?'（单个非分隔符字符）。
+   */
+  private simpleGlobMatch(pattern: string, target: string): boolean {
+    // 转义正则特殊字符，然后替换 glob 语法（注意：不转义 [ ] 以支持字符类）
     const regexStr = pattern
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // 转义特殊字符
+      .replace(/[.+^${}()|\\]/g, '\\$&')      // 转义特殊字符（保留 [ ]）
       .replace(/\*\*/g, '§DOUBLESTAR§')        // 临时替换 **
       .replace(/\*/g, '[^/]*')                  // * 不匹配路径分隔符
+      .replace(/\?/g, '[^/]')                   // ? 匹配单个非分隔符字符
       .replace(/§DOUBLESTAR§/g, '.*')           // ** 匹配所有字符
 
     try {
