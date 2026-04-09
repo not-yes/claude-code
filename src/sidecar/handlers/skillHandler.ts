@@ -1,29 +1,41 @@
 /**
  * sidecar/handlers/skillHandler.ts
  *
- * Skill（技能）管理 RPC handler。
+ * Skill（技皃）管理 RPC handler。
  * 提供 7 个 RPC 方法：
- *   - getSkills          → 获取所有技能
- *   - getSkill           → 获取单个技能
+ *   - getSkills          → 获取所有技能（与 CLI /skills 命令一致）
+ *   - getSkill           → 获取单个技能详情
  *   - createSkill        → 创建技能
  *   - installSkill       → 安装技能（本地或远程）
  *   - updateSkill        → 更新技能
  *   - deleteSkill        → 删除技能
  *   - searchRemoteSkills → 搜索远程技能（暂返回空数组）
  *
- * 数据存储：
- *   - ~/.claude/skills/{skillId}.json → 技能配置（含 content）
+ * 数据来源：
+ *   - 使用 CLI 的 commands 系统（getCommands/getSkillDirCommands 等）
+ *   - 与 CLI 交互层 `/skills` 命令显示的数据完全一致
+ *   - 包括：skillDirCommands、bundledSkills、pluginSkills、dynamicSkills 等
  */
 
 import { promises as fs } from 'fs'
-import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
+import { join } from 'path'
+import {
+  getSkillDirCommands,
+  getDynamicSkills,
+} from '../../skills/loadSkillsDir.js'
+import { getBundledSkills } from '../../skills/bundledSkills.js'
+import { getPluginSkills } from '../../utils/plugins/loadPluginCommands.js'
+import { getBuiltinPluginSkillCommands } from '../../plugins/builtinPlugins.js'
+import type { Command, CommandBase, PromptCommand } from '../../types/command.js'
+import { getCwdState } from '../../bootstrap/state.js'
+import type { AgentCore } from '../../core/AgentCore.js'
 
-// ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
+// ─── 内部 Skill 结构（从 Command 转换）────────────────────────────────────
 
 /**
- * 内部存储的 Skill 结构
+ * 内部存储的 Skill 结构（统一格式）
  */
 export interface Skill {
   id: string
@@ -35,9 +47,10 @@ export interface Skill {
   trigger_patterns: string[] // 触发模式
   suggested_tools: string[]  // 建议工具列表
   suggested_action?: string  // 建议动作
-  source: string             // 来源：'local' | 'remote' | url
+  source: string             // 来源：local | remote | bundled | plugin | mcp
   file_path: string          // 文件路径
   installed: boolean
+  loadedFrom?: string        // 加载来源标识
   scripts?: { name: string; file: string; description: string }[]
   createdAt: string
   updatedAt: string
@@ -79,158 +92,173 @@ interface ServerLike {
   registerMethod(name: string, handler: (params: any) => Promise<any>): void
 }
 
-// ─── 存储路径 ─────────────────────────────────────────────────────────────────
+// ─── 缓存 ─────────────────────────────────────────────────────────────────────
 
-const SKILLS_DIR = join(homedir(), '.claude', 'skills')
+// Skills 缓存（避免重复加载）
+let skillsCache: Skill[] | null = null
+let skillsCacheTime = 0
+const SKILLS_CACHE_TTL = 5000 // 5秒缓存
 
 /**
- * 技能配置文件路径
+ * 清除 skills 缓存（供外部调用）
  */
-function skillFilePath(skillId: string): string {
-  return join(SKILLS_DIR, `${skillId}.json`)
+export function clearSkillsCache(): void {
+  skillsCache = null
+  skillsCacheTime = 0
 }
 
-// ─── 文件操作工具 ─────────────────────────────────────────────────────────────
+// ─── 从 Command 转换为 Skill ────────────────────────────────────────────────
 
 /**
- * 确保 skills 目录存在
+ * 将 CLI Command (PromptCommand) 转换为内部 Skill 结构
  */
-async function ensureSkillsDir(): Promise<void> {
-  await fs.mkdir(SKILLS_DIR, { recursive: true })
-}
-
-/**
- * 解析 YAML frontmatter (---...--- 格式)
- */
-function parseFrontmatter(content: string): { data: Record<string, any>; body: string } {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
-  if (!match) {
-    return { data: {}, body: content }
+function commandToSkill(cmd: Command): Skill {
+  const now = new Date().toISOString()
+  const pc = cmd as PromptCommand & CommandBase
+  
+  // 从 source 和 loadedFrom 推断 category
+  const category = inferCategory(cmd)
+  
+  return {
+    id: cmd.name,
+    name: cmd.name,
+    description: cmd.description || '',
+    category,
+    version: cmd.version || '1.0.0',
+    guidance: '', // guidance 需要异步加载，在 getSkill 中处理
+    trigger_patterns: [], // commands 系统没有这个字段
+    suggested_tools: pc.allowedTools || [],
+    source: inferSource(cmd),
+    file_path: pc.skillRoot || '',
+    installed: true,
+    loadedFrom: cmd.loadedFrom,
+    createdAt: now,
+    updatedAt: now,
   }
-  // 简单的 YAML 解析（处理简单字段）
-  const yamlStr = match[1]
-  const body = match[2]
-  const data: Record<string, any> = {}
-
-  for (const line of yamlStr.split('\n')) {
-    const colonIdx = line.indexOf(':')
-    if (colonIdx > 0) {
-      const key = line.slice(0, colonIdx).trim()
-      let value = line.slice(colonIdx + 1).trim()
-      // 去除引号
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1)
-      }
-      data[key] = value
-    }
-  }
-
-  return { data, body }
 }
 
 /**
- * 读取所有技能配置（扫描 skills 目录中的 JSON 文件和 SKILL.md 目录）
+ * 推断 skill 分类
+ */
+function inferCategory(cmd: Command): string {
+  if (cmd.loadedFrom === 'mcp') return 'mcp'
+  if (cmd.loadedFrom === 'plugin') return 'plugin'
+  if (cmd.loadedFrom === 'bundled') return 'bundled'
+  const src = (cmd as PromptCommand).source
+  if (src === 'policySettings') return 'managed'
+  if (src === 'userSettings') return 'user'
+  if (src === 'projectSettings') return 'project'
+  return 'general'
+}
+
+/**
+ * 推断 skill 来源
+ */
+function inferSource(cmd: Command): string {
+  if (cmd.loadedFrom === 'mcp') return 'mcp'
+  if (cmd.loadedFrom === 'plugin') return 'plugin'
+  if (cmd.loadedFrom === 'bundled') return 'bundled'
+  return 'local'
+}
+
+/**
+ * 加载所有 skills（与 CLI /skills 命令一致）
+ */
+async function loadAllSkills(): Promise<Skill[]> {
+  const cwd = getCwdState() || process.cwd()
+  
+  try {
+    // 并行加载所有来源的 skills
+    const [
+      skillDirCommands,
+      pluginSkills,
+      bundledSkills,
+      builtinPluginSkills,
+      dynamicSkills,
+    ] = await Promise.all([
+      getSkillDirCommands(cwd).catch(err => {
+        logError('skillDirCommands 加载失败', err)
+        return []
+      }),
+      getPluginSkills().catch(err => {
+        logError('pluginSkills 加载失败', err)
+        return []
+      }),
+      Promise.resolve(getBundledSkills()),
+      Promise.resolve(getBuiltinPluginSkillCommands()),
+      Promise.resolve(getDynamicSkills()),
+    ])
+
+    // 合并所有 skills
+    const allCommands: Command[] = [
+      ...bundledSkills,
+      ...builtinPluginSkills,
+      ...skillDirCommands,
+      ...pluginSkills,
+      ...dynamicSkills,
+    ]
+
+    // 过滤出 prompt 类型的 commands（即 skills）
+    const promptCommands = allCommands.filter(
+      (cmd): cmd is Command => cmd.type === 'prompt'
+    )
+
+    // 去重（按 name）
+    const seen = new Set<string>()
+    const uniqueCommands = promptCommands.filter(cmd => {
+      if (seen.has(cmd.name)) return false
+      seen.add(cmd.name)
+      return true
+    })
+
+    // 转换为 Skill 结构
+    const skills = uniqueCommands.map(commandToSkill)
+
+    logInfo(`加载了 ${skills.length} 个 skills`)
+    return skills
+  } catch (err) {
+    logError('loadAllSkills 失败', err)
+    return []
+  }
+}
+
+/**
+ * 读取所有技能配置（带缓存）
  */
 async function readAllSkills(): Promise<Skill[]> {
-  try {
-    await ensureSkillsDir()
-    const entries = await fs.readdir(SKILLS_DIR, { withFileTypes: true })
-    const skills: Skill[] = []
-
-    for (const entry of entries) {
-      const entryPath = join(SKILLS_DIR, entry.name)
-
-      if (entry.isFile() && entry.name.endsWith('.json')) {
-        // JSON 格式技能
-        try {
-          const content = await fs.readFile(entryPath, 'utf-8')
-          const skill = JSON.parse(content) as Skill
-          skills.push(skill)
-        } catch {
-          // 单个文件读取失败不中断整体
-        }
-      } else if (entry.isDirectory()) {
-        // 目录格式技能（SKILL.md）
-        const skillMdPath = join(entryPath, 'SKILL.md')
-        try {
-          const content = await fs.readFile(skillMdPath, 'utf-8')
-          const { data } = parseFrontmatter(content)
-
-          // 读取 guidance 内容（SKILL.md 的 body）
-          const guidanceMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/)
-          const guidance = guidanceMatch ? guidanceMatch[1].trim() : ''
-
-          // 解析 trigger_patterns（可能是正则字符串）
-          let triggerPatterns: string[] = []
-          if (data.trigger_patterns) {
-            if (typeof data.trigger_patterns === 'string') {
-              // 可能是 | 分行的字符串
-              triggerPatterns = data.trigger_patterns.split('|').map((p: string) => p.trim()).filter(Boolean)
-            } else if (Array.isArray(data.trigger_patterns)) {
-              triggerPatterns = data.trigger_patterns
-            }
-          }
-
-          const skill: Skill = {
-            id: entry.name, // 使用目录名作为 ID
-            name: data.name || entry.name,
-            description: data.description || '',
-            category: data.category || '',
-            version: data.version || '1.0.0',
-            guidance: guidance,
-            trigger_patterns: triggerPatterns,
-            suggested_tools: Array.isArray(data.tool_whitelist) ? data.tool_whitelist : [],
-            source: 'local',
-            file_path: skillMdPath,
-            installed: true,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          }
-          skills.push(skill)
-        } catch {
-          // 目录中无 SKILL.md 或读取失败，跳过
-        }
-      }
-    }
-
-    return skills
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
-    throw err
+  const now = Date.now()
+  
+  // 检查缓存
+  if (skillsCache && (now - skillsCacheTime) < SKILLS_CACHE_TTL) {
+    return skillsCache
   }
+  
+  // 加载 skills
+  skillsCache = await loadAllSkills()
+  skillsCacheTime = now
+  
+  return skillsCache
 }
 
 /**
- * 读取单个技能配置（按 ID）
- */
-async function readSkillById(skillId: string): Promise<Skill | null> {
-  try {
-    const content = await fs.readFile(skillFilePath(skillId), 'utf-8')
-    return JSON.parse(content) as Skill
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null
-    }
-    throw err
-  }
-}
-
-/**
- * 按 name 查找技能（遍历所有技能）
+ * 按 name 查找技能
  */
 async function readSkillByName(name: string): Promise<Skill | null> {
   const skills = await readAllSkills()
   return skills.find(s => s.name === name) ?? null
 }
 
-/**
- * 写入技能配置
- */
-async function writeSkill(skill: Skill): Promise<void> {
-  await ensureSkillsDir()
-  await fs.writeFile(skillFilePath(skill.id), JSON.stringify(skill, null, 2), 'utf-8')
+// ─── 日志工具 ─────────────────────────────────────────────────────────────────
+
+function logInfo(...args: unknown[]): void {
+  const timestamp = new Date().toISOString()
+  process.stderr.write(`[${timestamp}] [INFO] [skillHandler] ${args.join(' ')}\n`)
+}
+
+function logError(msg: string, err: unknown): void {
+  const timestamp = new Date().toISOString()
+  const errMsg = err instanceof Error ? err.message : String(err)
+  process.stderr.write(`[${timestamp}] [ERROR] [skillHandler] ${msg}: ${errMsg}\n`)
 }
 
 // ─── DTO 转换 ─────────────────────────────────────────────────────────────────
@@ -279,27 +307,52 @@ function toSkillDetail(skill: Skill): SkillDetailDTO {
  */
 async function getSkills(): Promise<SkillInfoDTO[]> {
   const skills = await readAllSkills()
-  // 按创建时间降序排列
-  skills.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  // 按 name 排序
+  skills.sort((a, b) => a.name.localeCompare(b.name))
   return skills.map(toSkillInfo)
 }
 
 /**
  * getSkill → 获取单个技能详情（按 name 查找），返回 SkillDetail
+ * 注意：对于 file-based skills，需要读取 SKILL.md 文件内容作为 guidance
  */
 async function getSkill(params: { name: string }): Promise<SkillDetailDTO> {
   if (!params.name) {
     throw new Error('参数 name 不能为空')
   }
+  
   const skill = await readSkillByName(params.name)
   if (!skill) {
     throw new Error(`技能不存在: ${params.name}`)
   }
-  return toSkillDetail(skill)
+  
+  // 如果有 file_path 且是目录格式，尝试读取 SKILL.md 内容
+  let guidance = skill.guidance
+  if (skill.file_path && !guidance) {
+    try {
+      const skillMdPath = skill.file_path.endsWith('.md') 
+        ? skill.file_path 
+        : join(skill.file_path, 'SKILL.md')
+      
+      const content = await fs.readFile(skillMdPath, 'utf-8')
+      // 解析 frontmatter 后的 body 部分
+      const bodyMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?([\s\S]*)$/)
+      guidance = bodyMatch ? bodyMatch[1].trim() : content
+    } catch {
+      // 读取失败，使用空 guidance
+      guidance = ''
+    }
+  }
+  
+  return {
+    ...toSkillDetail(skill),
+    guidance,
+  }
 }
 
 /**
  * createSkill → 创建新技能，返回 SkillInfo
+ * 注意：这会创建一个新的 skill 文件到用户 skills 目录
  */
 async function createSkill(params: {
   name: string
@@ -313,12 +366,39 @@ async function createSkill(params: {
     throw new Error('参数 name 不能为空')
   }
 
-  const now = new Date().toISOString()
-  const id = randomUUID()
-  const filePath = skillFilePath(id)
+  const userSkillsDir = join(homedir(), '.claude', 'skills', params.name)
+  const skillMdPath = join(userSkillsDir, 'SKILL.md')
 
+  // 创建目录
+  await fs.mkdir(userSkillsDir, { recursive: true })
+
+  // 构建 SKILL.md 内容
+  const frontmatter = [
+    '---',
+    `name: ${params.name}`,
+    `description: ${params.description || ''}`,
+    `category: ${params.category || 'general'}`,
+    'version: 1.0.0',
+    params.trigger_patterns && params.trigger_patterns.length > 0
+      ? `trigger_patterns: [${params.trigger_patterns.join(', ')}]`
+      : '',
+    params.suggested_tools && params.suggested_tools.length > 0
+      ? `tool_whitelist: [${params.suggested_tools.join(', ')}]`
+      : '',
+    '---',
+    '',
+    params.guidance || `# ${params.name}\n\n${params.description || ''}`,
+  ].filter(line => line !== '').join('\n')
+
+  // 写入文件
+  await fs.writeFile(skillMdPath, frontmatter, 'utf-8')
+
+  // 清除缓存
+  clearSkillsCache()
+
+  const now = new Date().toISOString()
   const skill: Skill = {
-    id,
+    id: params.name,
     name: params.name,
     description: params.description ?? '',
     category: params.category ?? 'general',
@@ -327,13 +407,12 @@ async function createSkill(params: {
     trigger_patterns: params.trigger_patterns ?? [],
     suggested_tools: params.suggested_tools ?? [],
     source: 'local',
-    file_path: filePath,
-    installed: false,
+    file_path: skillMdPath,
+    installed: true,
     createdAt: now,
     updatedAt: now,
   }
 
-  await writeSkill(skill)
   return toSkillInfo(skill)
 }
 
@@ -349,55 +428,29 @@ async function installSkill(params: {
     throw new Error('参数 skill_id 不能为空')
   }
 
-  const now = new Date().toISOString()
-
-  // 尝试按 ID 查找已有技能
-  let existing = await readSkillById(params.skill_id)
-
-  if (!existing && params.source) {
-    // 远程安装：创建新技能记录
-    const id = randomUUID()
-    const filePath = skillFilePath(id)
-    const skill: Skill = {
-      id,
-      name: params.skill_id,
-      description: `从 ${params.source} 安装的远程技能`,
-      category: 'remote',
-      version: '1.0.0',
-      guidance: '',
-      trigger_patterns: [],
-      suggested_tools: [],
-      source: params.source,
-      file_path: filePath,
-      installed: true,
-      createdAt: now,
-      updatedAt: now,
-    }
-    await writeSkill(skill)
-    return toSkillInfo(skill)
-  }
-
-  if (!existing) {
-    // 也尝试按 name 查找
-    existing = await readSkillByName(params.skill_id)
-  }
+  // 查找已有技能
+  let existing = await readSkillByName(params.skill_id)
 
   if (!existing) {
     throw new Error(`技能不存在: ${params.skill_id}`)
   }
 
+  const now = new Date().toISOString()
   const updated: Skill = {
     ...existing,
     installed: true,
     updatedAt: now,
   }
 
-  await writeSkill(updated)
+  // 清除缓存
+  clearSkillsCache()
+
   return toSkillInfo(updated)
 }
 
 /**
  * updateSkill → 更新技能（按 name 查找），返回 SkillDetail
+ * 注意：这会更新 SKILL.md 文件内容
  */
 async function updateSkill(params: {
   name: string
@@ -417,6 +470,64 @@ async function updateSkill(params: {
     throw new Error(`技能不存在: ${params.name}`)
   }
 
+  // 如果有 file_path，更新 SKILL.md 文件
+  if (existing.file_path) {
+    try {
+      const skillMdPath = existing.file_path.endsWith('.md')
+        ? existing.file_path
+        : join(existing.file_path, 'SKILL.md')
+
+      // 读取现有内容
+      const content = await fs.readFile(skillMdPath, 'utf-8')
+      
+      // 解析并更新 frontmatter
+      const frontmatterMatch = content.match(/^(---\r?\n[\s\S]*?\r?\n---\r?\n)([\s\S]*)$/)
+      
+      if (frontmatterMatch) {
+        // 有 frontmatter，更新它
+        let [, frontmatter, body] = frontmatterMatch
+        
+        // 更新 frontmatter 中的字段
+        if (params.description !== undefined) {
+          frontmatter = frontmatter.replace(
+            /(description:\s*).*/,
+            `$1${params.description}`
+          )
+        }
+        if (params.category !== undefined) {
+          frontmatter = frontmatter.replace(
+            /(category:\s*).*/,
+            `$1${params.category}`
+          )
+        }
+        
+        // 更新 body（guidance）
+        if (params.guidance !== undefined) {
+          body = params.guidance
+        }
+        
+        await fs.writeFile(skillMdPath, frontmatter + body, 'utf-8')
+      } else {
+        // 没有 frontmatter，创建新的
+        const newContent = [
+          '---',
+          `name: ${existing.name}`,
+          `description: ${params.description ?? existing.description}`,
+          `category: ${params.category ?? existing.category}`,
+          `version: ${existing.version}`,
+          '---',
+          '',
+          params.guidance ?? existing.guidance,
+        ].join('\n')
+        
+        await fs.writeFile(skillMdPath, newContent, 'utf-8')
+      }
+    } catch (err) {
+      logError('更新 SKILL.md 文件失败', err)
+      // 文件更新失败不阻断返回
+    }
+  }
+
   const now = new Date().toISOString()
   const updated: Skill = {
     ...existing,
@@ -429,12 +540,15 @@ async function updateSkill(params: {
     updatedAt: now,
   }
 
-  await writeSkill(updated)
+  // 清除缓存
+  clearSkillsCache()
+
   return toSkillDetail(updated)
 }
 
 /**
  * deleteSkill → 删除技能（按 name 查找），返回 void
+ * 注意：这会删除 SKILL.md 文件或目录
  */
 async function deleteSkill(params: { name: string }): Promise<void> {
   if (!params.name) {
@@ -446,13 +560,32 @@ async function deleteSkill(params: { name: string }): Promise<void> {
     throw new Error(`技能不存在: ${params.name}`)
   }
 
-  try {
-    await fs.unlink(skillFilePath(existing.id))
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err
+  // 删除文件/目录
+  if (existing.file_path) {
+    try {
+      const targetPath = existing.file_path.endsWith('SKILL.md')
+        ? existing.file_path.replace(/SKILL\.md$/, '')
+        : existing.file_path
+      
+      // 检查是否是目录
+      const stat = await fs.stat(targetPath)
+      if (stat.isDirectory()) {
+        // 递归删除目录
+        await fs.rm(targetPath, { recursive: true, force: true })
+      } else {
+        // 删除文件
+        await fs.unlink(targetPath)
+      }
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      if (!errMsg.includes('ENOENT')) {
+        throw err
+      }
     }
   }
+
+  // 清除缓存
+  clearSkillsCache()
 }
 
 /**
@@ -474,7 +607,7 @@ async function searchRemoteSkills(params: {
 /**
  * 注册所有 Skill 相关 RPC 方法到服务器实例。
  */
-export function registerSkillHandlers(server: ServerLike): void {
+export function registerSkillHandlers(server: ServerLike, agentCore: AgentCore): void {
   server.registerMethod('getSkills', async (_params: unknown) => {
     return getSkills()
   })
@@ -484,7 +617,7 @@ export function registerSkillHandlers(server: ServerLike): void {
   })
 
   server.registerMethod('createSkill', async (params: unknown) => {
-    return createSkill(params as {
+    const result = await createSkill(params as {
       name: string
       description?: string
       category?: string
@@ -492,6 +625,8 @@ export function registerSkillHandlers(server: ServerLike): void {
       trigger_patterns?: string[]
       suggested_tools?: string[]
     })
+    agentCore.invalidateSkillCache()
+    return result
   })
 
   server.registerMethod('installSkill', async (params: unknown) => {
@@ -499,7 +634,7 @@ export function registerSkillHandlers(server: ServerLike): void {
   })
 
   server.registerMethod('updateSkill', async (params: unknown) => {
-    return updateSkill(params as {
+    const result = await updateSkill(params as {
       name: string
       description?: string
       category?: string
@@ -508,10 +643,13 @@ export function registerSkillHandlers(server: ServerLike): void {
       suggested_tools?: string[]
       suggested_action?: string
     })
+    agentCore.invalidateSkillCache()
+    return result
   })
 
   server.registerMethod('deleteSkill', async (params: unknown) => {
-    return deleteSkill(params as { name: string })
+    await deleteSkill(params as { name: string })
+    agentCore.invalidateSkillCache()
   })
 
   server.registerMethod('searchRemoteSkills', async (params: unknown) => {

@@ -349,15 +349,59 @@ async function executeJobAsync(
 
   try {
     const generator = agentCore.execute(instruction)
+    const toolCalls: Array<{ name: string; input: unknown; result?: unknown; isError?: boolean }> = []
+    let completionReason = ''
+
     for await (const event of generator) {
-      const e = event as { type?: string; content?: string; message?: string }
-      if (e.type === 'text' && e.content) {
-        outputChunks.push(e.content)
-      } else if (e.type === 'error') {
-        success = false
-        errorMsg = e.message ?? '未知错误'
+      const e = event as Record<string, unknown>
+      switch (e.type) {
+        case 'text':
+          if (e.content) {
+            outputChunks.push(String(e.content))
+          }
+          break
+        case 'tool_use':
+          toolCalls.push({
+            name: String(e.name ?? ''),
+            input: e.input ?? {},
+          })
+          break
+        case 'tool_result': {
+          // 找到对应的 tool_use 并附加结果
+          const lastTool = toolCalls.findLast(t => !t.result)
+          if (lastTool) {
+            lastTool.result = e.result
+            lastTool.isError = Boolean(e.isError)
+          }
+          if (e.isError) {
+            // 工具执行失败也记录到错误信息中
+            const toolErrMsg = typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '')
+            outputChunks.push(`[Tool Error] ${toolErrMsg}`)
+          }
+          break
+        }
+        case 'thinking':
+          // 可选：记录思考过程（不加入主输出）
+          break
+        case 'complete':
+          completionReason = String(e.reason ?? 'completed')
+          break
+        case 'error':
+          success = false
+          errorMsg = String(e.message ?? '未知错误')
+          break
+        default:
+          break
       }
     }
+
+    // 如果有工具调用，追加到输出中
+    if (toolCalls.length > 0) {
+      outputChunks.push(`\n[Tools used: ${toolCalls.map(t => t.name).join(', ')}]`)
+    }
+
+    // completionReason 供后续扩展使用（目前仅声明避免 lint 警告）
+    void completionReason
   } catch (err: unknown) {
     success = false
     errorMsg = err instanceof Error ? err.message : String(err)

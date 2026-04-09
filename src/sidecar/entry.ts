@@ -104,6 +104,50 @@ function readConfig(): {
   }
 }
 
+// ─── 配置验证 ─────────────────────────────────────────────────────────────────
+
+/**
+ * 验证 Sidecar 启动所需的关键配置。
+ *
+ * 仅记录警告/错误日志，不阻塞启动流程。
+ * API key 缺失时不退出进程，让后续的 API 调用自然失败并返回明确错误。
+ */
+function validateConfig(agentConfig: AgentCoreConfig): void {
+  // 验证 API Key
+  const apiKey = agentConfig.apiKey
+  if (!apiKey) {
+    log('ERROR', 'No API key found. Set SIDECAR_API_KEY or ANTHROPIC_API_KEY environment variable.')
+    log('WARN', 'Sidecar will start but API calls will fail without a valid API key.')
+  } else {
+    // 仅打印 key 前 8 位，避免泄露
+    const maskedKey = apiKey.slice(0, 8) + '...'
+    log('INFO', `API key detected: ${maskedKey}`)
+  }
+
+  // 验证工作目录
+  const cwd = agentConfig.cwd
+  if (!cwd) {
+    log('WARN', 'No working directory specified. Falling back to process.cwd().')
+  } else {
+    log('INFO', `Working directory: ${cwd}`)
+  }
+
+  // 验证权限模式
+  const permMode = agentConfig.defaultPermissionMode
+  if (permMode === 'auto-approve') {
+    log('WARN', 'Permission mode is auto-approve: all tool calls will be approved without prompting.')
+  }
+
+  // 验证预算上限
+  if (agentConfig.maxBudgetUsd !== undefined) {
+    if (isNaN(agentConfig.maxBudgetUsd) || agentConfig.maxBudgetUsd <= 0) {
+      log('WARN', `Invalid maxBudgetUsd value: ${agentConfig.maxBudgetUsd}. Budget limit will not be enforced.`)
+    } else {
+      log('INFO', `Max budget: $${agentConfig.maxBudgetUsd} USD`)
+    }
+  }
+}
+
 // ─── 主启动函数 ────────────────────────────────────────────────────────────────
 
 /**
@@ -119,9 +163,11 @@ async function main(): Promise<void> {
 
   // 1. 读取配置
   const { agentConfig, debug, permissionTimeoutMs } = readConfig()
-  log('INFO', `工作目录: ${agentConfig.cwd}`)
   log('INFO', `权限模式: ${agentConfig.defaultPermissionMode}`)
   log('INFO', `调试日志: ${debug}`)
+
+  // 1.5 配置验证（在 AgentCore 初始化之前校验关键参数）
+  validateConfig(agentConfig)
 
   // 启用配置读取（必须在 AgentCore 初始化之前）
   enableConfigs()

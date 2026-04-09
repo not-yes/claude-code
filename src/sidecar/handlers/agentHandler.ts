@@ -13,9 +13,11 @@
  *   - getAgentMemoryRecent  → 获取最新记忆列表
  *   - clearAgentMemory      → 清空 Agent 记忆
  *
- * 数据存储：
- *   - ~/.claude/agents/{agentId}.json           → Agent 配置
- *   - ~/.claude/agents/{agentId}/memories.json  → Agent 记忆
+ * 数据来源：
+ *   - 与 CLI 完全一致，使用 getAgentDefinitionsWithOverrides(cwd)
+ *   - 聚合多源：built-in + plugin + custom（user/project/policy）
+ *   - 支持 Markdown 格式（frontmatter + body）
+ *   - 支持 JSON 格式（向后兼容）
  */
 
 import { promises as fs } from 'fs'
@@ -23,10 +25,24 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
 
+// CLI Agent 加载系统
+import {
+  getAgentDefinitionsWithOverrides,
+  clearAgentDefinitionsCache,
+  type AgentDefinition,
+  type AgentDefinitionsResult,
+  isBuiltInAgent,
+  isCustomAgent,
+  isPluginAgent,
+} from '../../tools/AgentTool/loadAgentsDir.js'
+import { getCwdState } from '../../bootstrap/state.js'
+import { logError } from '../../utils/log.js'
+import type { AgentCore } from '../../core/AgentCore.js'
+
 // ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
 
 /**
- * 内部存储的 AgentConfig 结构
+ * 内部存储的 AgentConfig 结构（向后兼容 JSON 格式）
  */
 export interface AgentConfig {
   id: string
@@ -56,6 +72,22 @@ export interface AgentConfig {
 }
 
 /**
+ * 统一 Agent 信息接口（用于内部处理）
+ */
+interface AgentInfo {
+  name: string
+  description: string
+  model?: string
+  tools?: string[]
+  skills?: string[]
+  memory?: string
+  source: string
+  sourceLabel: string
+  file_path?: string
+  system_prompt?: string
+}
+
+/**
  * 内部 Agent 记忆条目（存储结构）
  */
 export interface AgentMemoryEntryStore {
@@ -67,6 +99,20 @@ export interface AgentMemoryEntryStore {
   createdAt: string
   accessCount?: number
   tags?: string[]
+}
+
+// ─── 缓存机制 ─────────────────────────────────────────────────────────────────
+
+let agentsCache: AgentInfo[] | null = null
+let agentsCacheTime = 0
+const AGENTS_CACHE_TTL = 5000 // 5秒缓存
+
+/**
+ * 清除 agents 缓存（在写操作后调用）
+ */
+export function clearAgentsCache(): void {
+  agentsCache = null
+  agentsCacheTime = 0
 }
 
 // ─── 前端 DTO 类型定义 ────────────────────────────────────────────────────────
@@ -119,16 +165,9 @@ interface ServerLike {
   registerMethod(name: string, handler: (params: any) => Promise<any>): void
 }
 
-// ─── 存储路径 ─────────────────────────────────────────────────────────────────
+// ─── 存储路径（仅用于记忆文件和向后兼容） ───────────────────────────────────────
 
 const AGENTS_DIR = join(homedir(), '.claude', 'agents')
-
-/**
- * Agent 配置文件路径（使用 agentName 作为文件名，kebab-case）
- */
-function agentConfigPath(agentId: string): string {
-  return join(AGENTS_DIR, `${agentId}.json`)
-}
 
 /**
  * Agent 记忆目录路径
@@ -147,79 +186,113 @@ function agentMemoryPath(agentId: string): string {
 // ─── 文件操作工具 ─────────────────────────────────────────────────────────────
 
 /**
- * 确保 agents 目录存在
- */
-async function ensureAgentsDir(): Promise<void> {
-  await fs.mkdir(AGENTS_DIR, { recursive: true })
-}
-
-/**
  * 确保 Agent 记忆目录存在
  */
 async function ensureAgentMemoryDir(agentId: string): Promise<void> {
   await fs.mkdir(agentMemoryDir(agentId), { recursive: true })
 }
 
+// ─── Agent 加载系统（与 CLI 一致） ─────────────────────────────────────────────
+
 /**
- * 读取所有 Agent 配置（扫描 agents 目录中的 JSON 文件，排除子目录中的文件）
+ * 将 CLI AgentDefinition 转换为内部 AgentInfo 结构
  */
-async function readAllAgents(): Promise<AgentConfig[]> {
+function agentDefinitionToInfo(agent: AgentDefinition): AgentInfo {
+  // 获取 system prompt
+  let systemPrompt = ''
   try {
-    await ensureAgentsDir()
-    const entries = await fs.readdir(AGENTS_DIR, { withFileTypes: true })
-    const agents: AgentConfig[] = []
-
-    for (const entry of entries) {
-      // 只读取直接子 JSON 文件（不递归，排除子目录）
-      if (entry.isFile() && entry.name.endsWith('.json')) {
-        try {
-          const content = await fs.readFile(join(AGENTS_DIR, entry.name), 'utf-8')
-          const agent = JSON.parse(content) as AgentConfig
-          agents.push(agent)
-        } catch {
-          // 单个文件读取失败不中断整体
-        }
-      }
+    if (!isBuiltInAgent(agent)) {
+      // Custom 和 Plugin agents 有无参 getSystemPrompt
+      systemPrompt = agent.getSystemPrompt()
     }
+    // Built-in agents 需要 toolUseContext，这里留空
+  } catch {
+    systemPrompt = ''
+  }
 
-    return agents
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return []
-    }
-    throw err
+  // 推断来源标签
+  let sourceLabel = 'built-in'
+  if (isCustomAgent(agent)) {
+    if (agent.source === 'userSettings') sourceLabel = 'user'
+    else if (agent.source === 'projectSettings') sourceLabel = 'project'
+    else if (agent.source === 'policySettings') sourceLabel = 'managed'
+    else if (agent.source === 'flagSettings') sourceLabel = 'flag'
+    else sourceLabel = 'custom'
+  } else if (isPluginAgent(agent)) {
+    sourceLabel = 'plugin'
+  }
+
+  return {
+    name: agent.agentType,
+    description: agent.whenToUse || '',
+    model: agent.model,
+    tools: agent.tools,
+    skills: agent.skills,
+    memory: agent.memory,
+    source: agent.source,
+    sourceLabel,
+    file_path: agent.baseDir || agent.filename || '',
+    system_prompt: systemPrompt,
   }
 }
 
 /**
- * 读取单个 Agent 配置（按 ID 读取）
+ * 加载所有 agents（与 CLI /agents 命令一致）
+ * 注意：过滤掉内置 agents，保留插件、用户级、项目级、管理级 agents
  */
-async function readAgentById(agentId: string): Promise<AgentConfig | null> {
+async function loadAllAgents(): Promise<AgentInfo[]> {
+  const cwd = getCwdState() || process.cwd()
+
   try {
-    const content = await fs.readFile(agentConfigPath(agentId), 'utf-8')
-    return JSON.parse(content) as AgentConfig
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null
+    // 使用 CLI 的 agent 加载系统
+    const result: AgentDefinitionsResult = await getAgentDefinitionsWithOverrides(cwd)
+
+    // 转换为 AgentInfo 数组
+    const agents = result.allAgents.map(agentDefinitionToInfo)
+
+    // 过滤掉内置 agents，保留插件、用户级、项目级、管理级
+    const filteredAgents = agents.filter(agent =>
+      agent.sourceLabel !== 'built-in'  // 只过滤内置 agents
+    )
+
+    // 按 name 去重（插件 < 用户 < 项目 < 管理）
+    const seen = new Map<string, AgentInfo>()
+    for (const agent of filteredAgents) {
+      // 后面的会覆盖前面的（plugin < user < project < managed）
+      seen.set(agent.name, agent)
     }
-    throw err
+
+    return Array.from(seen.values())
+  } catch (err) {
+    logError(err)
+    return []
   }
 }
 
 /**
- * 按 name 查找 Agent（遍历所有 Agent）
+ * 读取所有 agents（带缓存）
  */
-async function readAgentByName(name: string): Promise<AgentConfig | null> {
+async function readAllAgents(): Promise<AgentInfo[]> {
+  const now = Date.now()
+
+  // 检查缓存
+  if (agentsCache && (now - agentsCacheTime) < AGENTS_CACHE_TTL) {
+    return agentsCache
+  }
+
+  // 加载 agents
+  agentsCache = await loadAllAgents()
+  agentsCacheTime = now
+
+  return agentsCache
+}
+
+/**
+ * 按 name 查找单个 agent
+ */
+async function readAgentByName(name: string): Promise<AgentInfo | null> {
   const agents = await readAllAgents()
-  return agents.find(a => a.name === name) ?? null
-}
-
-/**
- * 写入 Agent 配置
- */
-async function writeAgent(agent: AgentConfig): Promise<void> {
-  await ensureAgentsDir()
-  await fs.writeFile(agentConfigPath(agent.id), JSON.stringify(agent, null, 2), 'utf-8')
+  return agents.find(a => a.name === name) || null
 }
 
 /**
@@ -248,35 +321,28 @@ async function writeAgentMemories(agentId: string, memories: AgentMemoryEntrySto
 // ─── DTO 转换 ─────────────────────────────────────────────────────────────────
 
 /**
- * 将内部 AgentConfig 转换为前端 AgentInfo DTO
+ * 将内部 AgentInfo 转换为前端 AgentInfo DTO
  */
-function toAgentInfo(agent: AgentConfig): AgentInfoDTO {
+function toAgentInfo(agent: AgentInfo): AgentInfoDTO {
   return {
     name: agent.name,
     description: agent.description,
-    topology: agent.topology,
     skills: agent.skills,
-    handoffs: agent.handoffs,
-    has_memory: agent.has_memory ?? (agent.memory?.enabled ?? false),
+    has_memory: !!agent.memory,
   }
 }
 
 /**
- * 将内部 AgentConfig 转换为前端 AgentDetail DTO
+ * 将内部 AgentInfo 转换为前端 AgentDetail DTO
  */
-function toAgentDetail(agent: AgentConfig): AgentDetailDTO {
+function toAgentDetail(agent: AgentInfo): AgentDetailDTO {
   return {
     name: agent.name,
     description: agent.description,
-    topology: agent.topology,
     skills: agent.skills,
-    handoffs: agent.handoffs,
-    has_memory: agent.has_memory ?? (agent.memory?.enabled ?? false),
-    soul: agent.soul,
-    memory: agent.memory,
-    hitl: agent.hitl,
+    has_memory: !!agent.memory,
+    soul: agent.system_prompt,
     model: agent.model,
-    max_iterations: agent.max_iterations,
   }
 }
 
@@ -300,8 +366,8 @@ function toMemoryEntryDTO(m: AgentMemoryEntryStore): AgentMemoryEntryDTO {
  */
 async function getAgents(): Promise<AgentInfoDTO[]> {
   const agents = await readAllAgents()
-  // 按创建时间降序排列
-  agents.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  // 按名称排序
+  agents.sort((a, b) => a.name.localeCompare(b.name))
   return agents.map(toAgentInfo)
 }
 
@@ -321,6 +387,7 @@ async function getAgent(params: { name: string }): Promise<AgentDetailDTO> {
 
 /**
  * createAgent → 创建新 Agent，返回 {name}
+ * 创建 Markdown 格式的 Agent 文件（与 CLI 一致）
  */
 async function createAgent(params: {
   name: string
@@ -328,29 +395,68 @@ async function createAgent(params: {
   description?: string
   skills?: string[]
   handoffs?: string[]
+  model?: string
+  tools?: string[]
+  memory?: string
 }): Promise<{ name: string }> {
   if (!params.name || typeof params.name !== 'string') {
     throw new Error('参数 name 不能为空')
   }
 
-  const now = new Date().toISOString()
-  const agent: AgentConfig = {
-    id: randomUUID(),
-    name: params.name,
-    description: params.description,
-    soul: params.soul,
-    skills: params.skills ?? [],
-    handoffs: params.handoffs ?? [],
-    createdAt: now,
-    updatedAt: now,
+  // 在用户级 agents 目录创建 Markdown 文件
+  const userAgentsDir = join(homedir(), '.claude', 'agents')
+  await fs.mkdir(userAgentsDir, { recursive: true })
+
+  const agentFileName = `${params.name}.md`
+  const agentFilePath = join(userAgentsDir, agentFileName)
+
+  // 构建 Markdown 内容（frontmatter + body）
+  const frontmatter = [
+    '---',
+    `name: ${params.name}`,
+    `description: ${params.description || ''}`,
+  ]
+
+  if (params.model) {
+    frontmatter.push(`model: ${params.model}`)
   }
 
-  await writeAgent(agent)
-  return { name: agent.name }
+  if (params.tools && params.tools.length > 0) {
+    frontmatter.push('tools:')
+    params.tools.forEach(tool => {
+      frontmatter.push(`  - ${tool}`)
+    })
+  }
+
+  if (params.skills && params.skills.length > 0) {
+    frontmatter.push('skills:')
+    params.skills.forEach(skill => {
+      frontmatter.push(`  - ${skill}`)
+    })
+  }
+
+  if (params.memory) {
+    frontmatter.push(`memory: ${params.memory}`)
+  }
+
+  frontmatter.push('---')
+  frontmatter.push('')
+
+  // system prompt 作为 body
+  const body = params.soul || `# ${params.name}\n\n${params.description || ''}`
+  frontmatter.push(body)
+
+  await fs.writeFile(agentFilePath, frontmatter.join('\n'), 'utf-8')
+
+  // 清除缓存
+  clearAgentsCache()
+
+  return { name: params.name }
 }
 
 /**
  * updateAgent → 更新 Agent 配置（按 name 查找），返回 void
+ * 注意：只能更新用户级自定义 agents，不能更新 built-in/plugin agents
  */
 async function updateAgent(params: {
   name: string
@@ -361,53 +467,116 @@ async function updateAgent(params: {
   model?: string
   max_iterations?: number
   topology?: string
+  tools?: string[]
+  memory?: string
 }): Promise<void> {
   if (!params.name) {
     throw new Error('参数 name 不能为空')
   }
 
-  const existing = await readAgentByName(params.name)
-  if (!existing) {
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const now = new Date().toISOString()
-  const updated: AgentConfig = {
-    ...existing,
-    description: params.description !== undefined ? params.description : existing.description,
-    soul: params.soul !== undefined ? params.soul : existing.soul,
-    topology: params.topology !== undefined ? params.topology : existing.topology,
-    model: params.model !== undefined ? params.model : existing.model,
-    max_iterations: params.max_iterations !== undefined ? params.max_iterations : existing.max_iterations,
-    skills: params.skills !== undefined ? params.skills : existing.skills,
-    handoffs: params.handoffs !== undefined ? params.handoffs : existing.handoffs,
-    updatedAt: now,
+  // 检查是否为用户级 agent（只有用户级的才能更新）
+  if (agent.sourceLabel !== 'user' && agent.sourceLabel !== 'project') {
+    throw new Error(`无法更新 ${agent.sourceLabel} 级 agent: ${params.name}`)
   }
 
-  await writeAgent(updated)
+  // 在用户级 agents 目录更新 Markdown 文件
+  const userAgentsDir = join(homedir(), '.claude', 'agents')
+  const agentFileName = `${params.name}.md`
+  const agentFilePath = join(userAgentsDir, agentFileName)
+
+  // 读取现有文件（保留未更新的字段）
+  let existingContent = ''
+  try {
+    existingContent = await fs.readFile(agentFilePath, 'utf-8')
+  } catch {
+    // 如果文件不存在，使用默认值
+  }
+
+  // 构建新的 Markdown 内容
+  const frontmatter = [
+    '---',
+    `name: ${params.name}`,
+    `description: ${params.description || agent.description || ''}`,
+  ]
+
+  if (params.model || agent.model) {
+    frontmatter.push(`model: ${params.model || agent.model || ''}`)
+  }
+
+  const tools = params.tools || agent.tools
+  if (tools && tools.length > 0) {
+    frontmatter.push('tools:')
+    tools.forEach(tool => {
+      frontmatter.push(`  - ${tool}`)
+    })
+  }
+
+  const skills = params.skills || agent.skills
+  if (skills && skills.length > 0) {
+    frontmatter.push('skills:')
+    skills.forEach(skill => {
+      frontmatter.push(`  - ${skill}`)
+    })
+  }
+
+  const memory = params.memory || agent.memory
+  if (memory) {
+    frontmatter.push(`memory: ${memory}`)
+  }
+
+  frontmatter.push('---')
+  frontmatter.push('')
+
+  // system prompt 作为 body
+  const body = params.soul || agent.system_prompt || `# ${params.name}\n\n${params.description || agent.description || ''}`
+  frontmatter.push(body)
+
+  await fs.writeFile(agentFilePath, frontmatter.join('\n'), 'utf-8')
+
+  // 清除缓存
+  clearAgentsCache()
 }
 
 /**
  * deleteAgent → 删除 Agent（按 name 查找），返回 void
+ * 注意：只能删除用户级自定义 agents
  */
 async function deleteAgent(params: { name: string }): Promise<void> {
   if (!params.name) {
     throw new Error('参数 name 不能为空')
   }
 
-  const existing = await readAgentByName(params.name)
-  if (!existing) {
+  const agent = await readAgentByName(params.name)
+  if (!agent) {
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
+  // 检查是否为用户级 agent（只有用户级的才能删除）
+  if (agent.sourceLabel !== 'user' && agent.sourceLabel !== 'project') {
+    throw new Error(`无法删除 ${agent.sourceLabel} 级 agent: ${params.name}`)
+  }
+
+  // 删除 Markdown 文件
+  const userAgentsDir = join(homedir(), '.claude', 'agents')
+  const agentFilePath = join(userAgentsDir, `${params.name}.md`)
+
   try {
-    await fs.unlink(agentConfigPath(existing.id))
+    await fs.unlink(agentFilePath)
+
     // 同时尝试删除记忆目录（可选，忽略错误）
     try {
-      await fs.rm(agentMemoryDir(existing.id), { recursive: true, force: true })
+      await fs.rm(agentMemoryDir(params.name), { recursive: true, force: true })
     } catch {
       // 记忆目录删除失败不影响主要操作
     }
+
+    // 清除缓存
+    clearAgentsCache()
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw err
@@ -428,7 +597,7 @@ async function getAgentMemoryStats(params: { name: string }): Promise<AgentMemor
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const memories = await readAgentMemories(agent.id)
+  const memories = await readAgentMemories(params.name)
 
   return {
     agent: params.name,
@@ -460,7 +629,7 @@ async function searchAgentMemory(params: {
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const memories = await readAgentMemories(agent.id)
+  const memories = await readAgentMemories(params.name)
   const queryLower = params.q.toLowerCase()
 
   let results = memories.filter(m => m.content.toLowerCase().includes(queryLower))
@@ -494,7 +663,7 @@ async function getAgentMemoryRecent(params: {
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const memories = await readAgentMemories(agent.id)
+  const memories = await readAgentMemories(params.name)
 
   // 按时间降序排列
   memories.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -521,9 +690,9 @@ async function clearAgentMemory(params: { name: string }): Promise<void> {
     throw new Error(`Agent 不存在: ${params.name}`)
   }
 
-  const memories = await readAgentMemories(agent.id)
+  const memories = await readAgentMemories(params.name)
   if (memories.length > 0) {
-    await writeAgentMemories(agent.id, [])
+    await writeAgentMemories(params.name, [])
   }
 }
 
@@ -532,7 +701,7 @@ async function clearAgentMemory(params: { name: string }): Promise<void> {
 /**
  * 注册所有 Agent 相关 RPC 方法到服务器实例。
  */
-export function registerAgentHandlers(server: ServerLike): void {
+export function registerAgentHandlers(server: ServerLike, agentCore: AgentCore): void {
   server.registerMethod('getAgents', async (_params: unknown) => {
     return getAgents()
   })
@@ -542,17 +711,19 @@ export function registerAgentHandlers(server: ServerLike): void {
   })
 
   server.registerMethod('createAgent', async (params: unknown) => {
-    return createAgent(params as {
+    const result = await createAgent(params as {
       name: string
       soul?: string
       description?: string
       skills?: string[]
       handoffs?: string[]
     })
+    agentCore.invalidateAgentCache()
+    return result
   })
 
   server.registerMethod('updateAgent', async (params: unknown) => {
-    return updateAgent(params as {
+    const p = params as {
       name: string
       soul?: string
       description?: string
@@ -561,11 +732,15 @@ export function registerAgentHandlers(server: ServerLike): void {
       model?: string
       max_iterations?: number
       topology?: string
-    })
+    }
+    await updateAgent(p)
+    agentCore.invalidateAgentCache(p.name)
   })
 
   server.registerMethod('deleteAgent', async (params: unknown) => {
-    return deleteAgent(params as { name: string })
+    const p = params as { name: string }
+    await deleteAgent(p)
+    agentCore.invalidateAgentCache(p.name)
   })
 
   server.registerMethod('getAgentMemoryStats', async (params: unknown) => {

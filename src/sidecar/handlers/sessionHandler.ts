@@ -151,10 +151,42 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
         }
         const msgs: SessionMessage[] = (session.messages ?? []).map((m: unknown) => {
           const msg = m as Record<string, unknown>
+
+          // 新格式（SDK transcript 包装）: { type, message: { role, content: [...], uuid }, session_id, ... }
+          if (msg['type'] && msg['message']) {
+            const inner = msg['message'] as Record<string, unknown>
+            const role = (inner['role'] as 'user' | 'assistant') ?? 'user'
+
+            let text = ''
+            const content = inner['content']
+            if (Array.isArray(content)) {
+              // content 是 ContentBlock 数组，提取所有 text 块
+              text = content
+                .filter((b: any) => b.type === 'text')
+                .map((b: any) => b.text ?? '')
+                .join('')
+            } else if (typeof content === 'string') {
+              text = content
+            } else {
+              text = JSON.stringify(content ?? '')
+            }
+
+            return {
+              id: (inner['uuid'] as string) ?? (msg['id'] as string | undefined),
+              role,
+              content: text,
+              created_at: (msg['created_at'] as string | undefined),
+            }
+          }
+
+          // 旧格式回退（role/content 顶层字段）
           return {
             id: msg['id'] as string | undefined,
             role: (msg['role'] as 'user' | 'assistant') ?? 'user',
-            content: typeof msg['content'] === 'string' ? msg['content'] : String(msg['content'] ?? ''),
+            content:
+              typeof msg['content'] === 'string'
+                ? (msg['content'] as string)
+                : String(msg['content'] ?? ''),
             created_at: msg['created_at'] as string | undefined,
           }
         })
@@ -177,15 +209,8 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
       const { sessionId } = DeleteSessionParamsSchema.parse(params)
 
       try {
-        // 直接调用 AgentCore.getSession() 检查是否存在
-        const session = await agentCore.getSession(sessionId)
-        if (!session) {
-          return { deleted: false }
-        }
-        // 调用 clearSession() 清空会话消息历史
-        // 注： clearSession() 内部会删除持久化文件
-        await agentCore.clearSession()
-        return { deleted: true }
+        const deleted = await agentCore.deleteSession(sessionId)
+        return { deleted }
       } catch {
         return { deleted: false }
       }

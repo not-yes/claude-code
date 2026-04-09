@@ -45,6 +45,7 @@ import {
   registerCronHandlers,
   registerAgentHandlers,
   registerSkillHandlers,
+  registerMcpHandlers,
 } from './handlers/index'
 
 // ─── JSON-RPC 2.0 类型定义 ─────────────────────────────────────────────────────
@@ -102,6 +103,8 @@ const ExecuteParamsSchema = z.object({
       maxTurns: z.number().int().positive().optional(),
       enableThinking: z.boolean().optional(),
       requestId: z.string().optional(),
+      /** Agent ID - 加载对应 agent 的 skills 和配置 */
+      agentId: z.string().optional(),
     })
     .optional(),
 })
@@ -188,8 +191,28 @@ export class JsonRpcServer {
     registerSessionHandlers(this)
     registerCheckpointHandlers(this)
     registerCronHandlers(this)
-    registerAgentHandlers(this)
-    registerSkillHandlers(this)
+    registerAgentHandlers(this, this.agentCore)
+    registerSkillHandlers(this, this.agentCore)
+    registerMcpHandlers(this, this.agentCore)
+
+    // 注册内置扩展方法
+    this.registerMethod('resetConversation', async (): Promise<{ success: boolean }> => {
+      try {
+        this.agentCore.resetConversation()
+        return { success: true }
+      } catch {
+        return { success: false }
+      }
+    })
+
+    this.registerMethod('getState', async (): Promise<Record<string, unknown>> => {
+      const state = agentCore.getState?.() ?? {}
+      return {
+        sessionId: (state as any).sessionId ?? null,
+        permissionMode: (state as any).permissionMode ?? null,
+        isInitialized: true,
+      }
+    })
   }
 
   /**
@@ -505,6 +528,28 @@ export class JsonRpcServer {
       this.debugLog(
         `[${executeId}] 流执行完成: success=${result.success}, events=${result.eventCount}`,
       )
+    } catch (error) {
+      // 捕获流启动或运行期间的未预期异常（handler.handle 内部通常自己处理错误，
+      // 此处为双保险：防止 StreamHandler 外层抛出的错误导致客户端永远收不到结束信号）
+      const errorMsg = error instanceof Error ? error.message : String(error)
+      this.debugLog(`[${executeId}] 流执行异常（外层捕获）:`, errorMsg)
+
+      // 通知客户端流启动/运行失败
+      try {
+        const notification = JSON.stringify({
+          jsonrpc: '2.0',
+          method: '$/streamError',
+          params: {
+            executeId,
+            message: errorMsg,
+            code: 'STREAM_START_FAILED',
+          },
+        })
+        await this.writeLine(notification)
+      } catch (writeErr) {
+        // stdout 写入失败（进程可能正在关闭），只记录日志
+        this.debugLog(`[${executeId}] 发送流启动失败通知失败:`, writeErr)
+      }
     } finally {
       // 无论成功还是失败，都要注销
       this.streamRegistry.unregister(executeId)

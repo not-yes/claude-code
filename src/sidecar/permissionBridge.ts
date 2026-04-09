@@ -143,7 +143,7 @@ export class PermissionBridge {
       granted: result.granted,
       remember: result.remember,
       denyReason: result.denyReason,
-    })
+    } as PermissionDecision)
     return true
   }
 

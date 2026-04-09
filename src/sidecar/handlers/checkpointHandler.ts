@@ -306,6 +306,19 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
         // 无法获取消息时，保存空快照
       }
 
+      // 在保存前验证消息的可序列化性
+      if (messages.length > 0) {
+        try {
+          JSON.stringify(messages)
+        } catch (e) {
+          return {
+            checkpoint_id: '',
+            tag,
+            step: 0,
+          }
+        }
+      }
+
       const { randomUUID } = await import('crypto')
       const checkpoint: Checkpoint = {
         id: randomUUID(),
@@ -339,10 +352,15 @@ export function registerCheckpointHandlers(server: JsonRpcServer): void {
         throw new Error(`Checkpoint 不存在: ${checkpointId}`)
       }
 
-      // 回滚操作：清空当前会话（简化实现）
-      // 完整实现需要将 checkpoint.messages 注入 StateManager
+      // 回滚操作：恢复 checkpoint 中保存的消息状态
       try {
-        await agentCore.clearSession()
+        if (checkpoint.messages && Array.isArray(checkpoint.messages) && checkpoint.messages.length > 0) {
+          // 有消息快照时，恢复消息状态
+          agentCore.restoreMessages(checkpoint.messages)
+        } else {
+          // checkpoint 没有消息数据时，回退到重置
+          agentCore.resetConversation()
+        }
         return {
           checkpoint_id: checkpoint.id,
           step: checkpoint.messageIndex,

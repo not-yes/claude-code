@@ -73,6 +73,11 @@ export class StreamHandler {
   private writeLine: (line: string) => Promise<void>
   private options: Required<StreamHandlerOptions>
 
+  /** 流是否已正常完成（防止重复清理） */
+  private isCompleted = false
+  /** 流是否已被中止（防止重复中止） */
+  private isAborted = false
+
   /**
    * @param writeLine 向 stdout 写入一行（带背压等待）的异步函数
    * @param options 配置选项
@@ -104,9 +109,35 @@ export class StreamHandler {
     generator: AsyncGenerator<SidecarStreamEvent>,
   ): Promise<StreamResult> {
     let eventCount = 0
+    let hasReceivedFirstEvent = false
+
+    // 流启动超时检测：10 秒内未收到任何事件则发送超时错误通知
+    let startTimeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(async () => {
+      if (!hasReceivedFirstEvent) {
+        this.debugLog(`[${executeId}] 流启动超时，10 秒内未收到任何事件`)
+        try {
+          await this.sendStreamErrorNotification(
+            executeId,
+            'Stream start timeout: no events received within 10 seconds',
+            'STREAM_START_TIMEOUT',
+          )
+        } catch {
+          // stdout 写入失败，忽略
+        }
+      }
+    }, 10_000)
 
     try {
       for await (const event of generator) {
+        // 收到第一条事件，清除超时计时器
+        if (!hasReceivedFirstEvent) {
+          hasReceivedFirstEvent = true
+          if (startTimeoutHandle !== null) {
+            clearTimeout(startTimeoutHandle)
+            startTimeoutHandle = null
+          }
+        }
+
         eventCount++
         this.debugLog(`[${executeId}] 事件 #${eventCount}:`, event.type)
 
@@ -116,6 +147,9 @@ export class StreamHandler {
         // 如果收到 complete 或 error 事件，流已结束（generator 内部也会 return）
         // 但为了安全起见，让 generator 自然结束，不在这里 break
       }
+
+      // 流正常完成，标记状态
+      this.isCompleted = true
 
       // 发送 `$/complete` notification
       await this.sendCompleteNotification(executeId)
@@ -140,6 +174,11 @@ export class StreamHandler {
       }
 
       return { success: false, errorMessage: message, errorCode: code, eventCount }
+    } finally {
+      // 确保超时计时器在流结束时总是被清除
+      if (startTimeoutHandle !== null) {
+        clearTimeout(startTimeoutHandle)
+      }
     }
   }
 
@@ -153,6 +192,13 @@ export class StreamHandler {
     executeId: string,
     generator: AsyncGenerator<SidecarStreamEvent>,
   ): Promise<void> {
+    // 防止双重中止或在已完成的流上执行 abort
+    if (this.isCompleted || this.isAborted) {
+      this.debugLog(`[${executeId}] abort 被跳过（isCompleted=${this.isCompleted}, isAborted=${this.isAborted}）`)
+      return
+    }
+    this.isAborted = true
+
     try {
       await generator.return(undefined)
       this.debugLog(`[${executeId}] 流已主动中止`)
