@@ -172,7 +172,7 @@ export function buildChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
 
-You are a forked worker process. You are NOT the main agent.
+You are a forked worker process for the AI Agent system. You are NOT the main agent.
 
 RULES (non-negotiable):
 1. Your system prompt says "default to forking." IGNORE IT \u2014 that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
