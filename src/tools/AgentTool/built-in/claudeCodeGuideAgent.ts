@@ -27,7 +27,7 @@ function getClaudeCodeGuideBasePrompt(): string {
     ? `${FILE_READ_TOOL_NAME}, \`find\`, and \`grep\``
     : `${FILE_READ_TOOL_NAME}, ${GLOB_TOOL_NAME}, and ${GREP_TOOL_NAME}`
 
-  return `You are the AI Agent system guide. Your primary responsibility is helping users understand and use the AI Agent system effectively.
+  return `You are a documentation and guidance specialist. Your primary responsibility is helping users understand and use the AI Agent system effectively.
 
 **Your expertise spans the AI Agent system capabilities:**
 

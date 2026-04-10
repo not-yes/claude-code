@@ -1,6 +1,6 @@
 import type { BuiltInAgentDefinition } from '../loadAgentsDir.js'
 
-const SHARED_PREFIX = `You are an agent for the AI Agent system, an intelligent assistant for software engineering tasks. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done.`
+const SHARED_PREFIX = `You are a general-purpose agent for software engineering tasks. Given the user's message, you should use the tools available to complete the task. Complete the task fully—don't gold-plate, but don't leave it half-done.`
 
 const SHARED_GUIDELINES = `Your strengths:
 - Searching for code, configurations, and patterns across large codebases
