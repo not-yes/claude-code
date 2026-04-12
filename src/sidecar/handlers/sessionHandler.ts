@@ -31,11 +31,14 @@ import {
 } from '../../cost-tracker.js'
 import { getTotalToolDuration } from '../../bootstrap/state.js'
 import type { JsonRpcServer } from '../jsonRpcServer'
+import { listSessionsImpl } from '../../utils/listSessionsImpl.js'
+import { extractLastJsonStringField, readSessionLite, resolveSessionFilePath } from '../../utils/sessionStoragePortable.js'
 
 // ─── 参数 Schema ───────────────────────────────────────────────────────────────
 
 const GetSessionsParamsSchema = z.object({
   agent_id: z.string().optional(),
+  cwd: z.string().optional(),  // 工作目录过滤
   limit: z.number().int().positive().optional(),
   include_system: z.boolean().optional(),
 })
@@ -76,6 +79,9 @@ interface SessionItem {
   agent_id?: string
   created_at?: string
   updated_at?: string
+  cwd?: string
+  tag?: string
+  gitBranch?: string
   [key: string]: unknown
 }
 
@@ -146,28 +152,105 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
     async (params: unknown): Promise<SessionItem[]> => {
       const parsed = GetSessionsParamsSchema.parse(params)
       const limit = parsed.limit ?? 100
+      const requestedAgentId = parsed.agent_id // 前端请求的 agent_id
+      const requestedCwd = parsed.cwd  // 前端请求的工作目录
 
+      const allSessions: SessionItem[] = []
+      const seenIds = new Set<string>()
+
+      // 1. 读取 CLI projects 目录的会话
       try {
-        const sessions = await agentCore.listSessions()
-        // 过滤和截断
-        const result = sessions
-          .filter(s => {
-            // 如果指定 agent_id 且不是 'default'，对于当前单 Agent 实现返回全部
-            return true
-          })
-          .slice(0, limit)
+        // 优先使用前端传递的 cwd，否则使用 agentCore 的 cwd
+        const cwd = requestedCwd || agentCore.getState().cwd
+        console.error(`[getSessions] DEBUG: cwd=${cwd}, limit=${limit}, requestedAgentId=${requestedAgentId}`)
+        
+        const cliSessions = await listSessionsImpl({ dir: cwd, limit: limit * 2 })
+        console.error(`[getSessions] DEBUG: cliSessions.length=${cliSessions.length}`)
 
-        return result.map(s => ({
-          id: s.id,
-          title: s.metadata?.['name'] as string | undefined,
-          task: undefined,
-          agent_id: parsed.agent_id ?? 'default',
-          created_at: s.createdAt,
-          updated_at: s.updatedAt,
-        }))
-      } catch {
-        return []
+        for (const s of cliSessions) {
+          if (seenIds.has(s.sessionId)) continue
+
+          // 尝试从 JSONL 头部提取 agentName
+          let agentName: string | undefined
+          try {
+            const resolved = await resolveSessionFilePath(s.sessionId, cwd)
+            if (resolved) {
+              const lite = await readSessionLite(resolved.filePath)
+              if (lite?.head) {
+                agentName = extractLastJsonStringField(lite.head, 'agentName')
+              }
+            }
+          } catch {
+            // 忽略提取失败
+          }
+
+          const sessionAgentId = agentName || 'main'
+          
+          // 如果请求了特定 agent_id，只返回匹配的会话
+          if (requestedAgentId && sessionAgentId !== requestedAgentId) {
+            continue
+          }
+
+          seenIds.add(s.sessionId)
+          allSessions.push({
+            id: s.sessionId,
+            title: s.customTitle || s.summary,
+            task: s.firstPrompt,
+            agent_id: sessionAgentId,
+            created_at: s.createdAt ? new Date(s.createdAt).toISOString() : undefined,
+            updated_at: new Date(s.lastModified).toISOString(),
+            cwd: s.cwd,
+            tag: s.tag,
+            gitBranch: s.gitBranch,
+          })
+        }
+      } catch (err) {
+        console.error(`[getSessions] ERROR: CLI sessions read failed:`, err)
+        // CLI 会话读取失败不影响 sidecar 会话
       }
+
+      // 2. 读取 sidecar 自身会话
+      try {
+        const sidecarSessions = await agentCore.listSessions()
+        console.error(`[getSessions] DEBUG: sidecarSessions.length=${sidecarSessions.length}`)
+        
+        for (const s of sidecarSessions) {
+          if (seenIds.has(s.id)) continue
+          
+          // 当前 sidecar 进程对应的 agent 身份（由 Rust 启动时通过 AGENT_ID 环境变量注入）
+          const sessionAgentId = process.env.AGENT_ID ?? 'main'
+          
+          // 如果请求了特定 agent_id，只返回匹配的会话
+          if (requestedAgentId && sessionAgentId !== requestedAgentId) {
+            continue
+          }
+
+          seenIds.add(s.id)
+          allSessions.push({
+            id: s.id,
+            title: (s.metadata?.['name'] as string | undefined) || `Session ${s.id.slice(0, 8)}`,
+            task: undefined,
+            agent_id: sessionAgentId,
+            created_at: s.createdAt,
+            updated_at: s.updatedAt,
+            cwd: agentCore.getState().cwd || undefined,
+          })
+        }
+      } catch (err) {
+        console.error(`[getSessions] ERROR: sidecar sessions read failed:`, err)
+        // sidecar 会话读取失败也不影响已获取的 CLI 会话
+      }
+
+      console.error(`[getSessions] DEBUG: allSessions.length=${allSessions.length}`)
+
+      // 3. 按更新时间降序排序并截断
+      allSessions.sort((a, b) => {
+        const ta = a.updated_at ? new Date(a.updated_at).getTime() : 0
+        const tb = b.updated_at ? new Date(b.updated_at).getTime() : 0
+        return tb - ta
+      })
+
+      return allSessions.slice(0, limit)
     },
   )
 

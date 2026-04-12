@@ -443,19 +443,20 @@ class AgentCoreImpl implements AgentCore {
 
       // 设置全局 cwd 状态，确保 getProjectRoot() 和 SkillTool 等依赖全局 cwd 的函数能正确工作
       const { setCwdState, setProjectRoot } = await import('../bootstrap/state.js')
-      setCwdState(this.config.cwd)
-      setProjectRoot(this.config.cwd)
+      const runtimeCwd = options?.cwd || this.config.cwd
+      setCwdState(runtimeCwd)
+      setProjectRoot(runtimeCwd)
 
       // 获取工具列表（已筛选的）
       const tools = toolRegistry.getEnabledTools(options?.allowedTools)
 
       // 加载 slash commands（含 skills），用于 QueryEngine 系统提示中的 skill 列表
       const { getCommands } = await import('../commands.js')
-      const commands = await getCommands(this.config.cwd)
+      const commands = await getCommands(runtimeCwd)
 
       // 构造 QueryEngine 配置
       const engineConfig = {
-        cwd: this.config.cwd,
+        cwd: runtimeCwd,
         tools,
         commands,
         mcpClients: this.mcpClients,
@@ -480,7 +481,7 @@ class AgentCoreImpl implements AgentCore {
       this.log('info', 'QueryEngine 创建完成，开始 submitMessage', {
         toolCount: tools.length,
         historyMessages: this.messageHistory.length,
-        cwd: this.config.cwd,
+        cwd: runtimeCwd,
         model: options?.model ?? 'default',
       })
       process.stderr.write(`[AgentCore] 开始 submitMessage, toolCount=${tools.length}, historyMessages=${this.messageHistory.length}\n`)

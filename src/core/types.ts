@@ -192,6 +192,8 @@ export interface ExecuteOptions {
   requestId?: string
   /** Agent ID - 加载对应 agent 的 skills 和配置 */
   agentId?: string
+  /** 工作目录 - 运行时指定（优先于 config.cwd） */
+  cwd?: string
 }
 
 // ─── 会话类型 ──────────────────────────────────────────────────────────────────

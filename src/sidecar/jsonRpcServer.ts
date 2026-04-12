@@ -105,6 +105,8 @@ const ExecuteParamsSchema = z.object({
       requestId: z.string().optional(),
       /** Agent ID - 加载对应 agent 的 skills 和配置 */
       agentId: z.string().optional(),
+      /** 工作目录 - 运行时指定（优先于 config.cwd） */
+      cwd: z.string().optional(),
     })
     .optional(),
 })

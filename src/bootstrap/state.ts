@@ -1435,7 +1435,7 @@ export function registerHookCallbacks(
     if (!STATE.registeredHooks[eventKey]) {
       STATE.registeredHooks[eventKey] = []
     }
-    STATE.registeredHooks[eventKey]!.push(...matchers)
+    STATE.registeredHooks[eventKey]!.push(...(matchers as RegisteredHookMatcher[]))
   }
 }
 
@@ -1457,7 +1457,7 @@ export function clearRegisteredPluginHooks(): void {
   const filtered: Partial<Record<HookEvent, RegisteredHookMatcher[]>> = {}
   for (const [event, matchers] of Object.entries(STATE.registeredHooks)) {
     // Keep only callback hooks (those without pluginRoot)
-    const callbackHooks = matchers.filter(m => !('pluginRoot' in m))
+    const callbackHooks = (matchers ?? []).filter(m => !('pluginRoot' in m))
     if (callbackHooks.length > 0) {
       filtered[event as HookEvent] = callbackHooks
     }
