@@ -230,7 +230,7 @@ function decisionReasonToOTelSource(
       return behavior === 'allow' ? 'user_temporary' : 'user_reject'
     }
     case 'rule':
-      return ruleSourceToOTelSource(reason.rule.source, behavior)
+      return ruleSourceToOTelSource(reason.rule?.source, behavior)
     case 'hook':
       return 'hook'
     case 'mode':

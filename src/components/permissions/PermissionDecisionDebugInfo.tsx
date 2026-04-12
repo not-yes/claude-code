@@ -35,7 +35,7 @@ function decisionReasonDisplayString(
   }
   switch (decisionReason.type) {
     case 'rule':
-      return `${chalk.bold(permissionRuleValueToString(decisionReason.rule.ruleValue))} rule from ${getSettingSourceDisplayNameLowercase(decisionReason.rule.source)}`
+      return `${chalk.bold(permissionRuleValueToString(decisionReason.rule?.ruleValue))} rule from ${getSettingSourceDisplayNameLowercase(decisionReason.rule?.source)}`
     case 'mode':
       return `${permissionModeTitle(decisionReason.mode)} mode`
     case 'sandboxOverride':

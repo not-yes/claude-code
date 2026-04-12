@@ -304,6 +304,14 @@ export const loadMarkdownFilesForSubdir = memoize(
     const managedDir = join(getManagedFilePath(), '.claude', subdir)
     const projectDirs = getProjectDirsUpToHome(subdir, cwd)
 
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: subdir=${subdir}, cwd=${cwd}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: userDir=${userDir}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: managedDir=${managedDir}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: projectDirs=[${projectDirs.join(', ')}]`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: isSettingSourceEnabled('userSettings')=${isSettingSourceEnabled('userSettings')}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: isRestrictedToPluginOnly('agents')=${isRestrictedToPluginOnly('agents')}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir: isSettingSourceEnabled('projectSettings')=${isSettingSourceEnabled('projectSettings')}`)
+
     // For git worktrees where the worktree does NOT have .claude/<subdir> checked
     // out (e.g. sparse-checkout), fall back to the main repository's copy.
     // getProjectDirsUpToHome stops at the worktree root (where the .git file is),
@@ -422,6 +430,9 @@ export const loadMarkdownFilesForSubdir = memoize(
       subdir:
         subdir as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
+
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir DONE: subdir=${subdir}, managed=${managedFiles.length}, user=${userFiles.length}, project=${projectFiles.length}, deduped=${deduplicatedFiles.length}`)
+    console.error(`[agentDiag] loadMarkdownFilesForSubdir files: [${deduplicatedFiles.map(f => f.filePath + '(' + f.source + ')').join(', ')}]`)
 
     return deduplicatedFiles
   },
@@ -571,7 +582,19 @@ async function loadMarkdownFiles(dir: string): Promise<
     // existence (TOCTOU). findMarkdownFilesNative already catches internally;
     // ripGrep rejects on inaccessible target paths.
     if (isFsInaccessible(e)) return []
-    throw e
+    // When ripgrep is unavailable (e.g. in compiled sidecar binary),
+    // fall back to native file search before giving up
+    if (!useNative) {
+      try {
+        const fallbackSignal = AbortSignal.timeout(3000)
+        files = await findMarkdownFilesNative(dir, fallbackSignal)
+      } catch (fallbackErr: unknown) {
+        if (isFsInaccessible(fallbackErr)) return []
+        throw fallbackErr
+      }
+    } else {
+      throw e
+    }
   }
 
   const results = await Promise.all(

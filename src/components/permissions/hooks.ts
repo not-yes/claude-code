@@ -38,7 +38,7 @@ function permissionResultToLog(permissionResult: PermissionResult): string {
         rules.length > 0
           ? rules.map(r => permissionRuleValueToString(r)).join(', ')
           : 'none'
-      return `ask: ${permissionResult.message}, 
+      return `ask: ${permissionResult.message},
 suggestions: ${suggestions}
 reason: ${decisionReasonToString(permissionResult.decisionReason)}`
     }
@@ -72,7 +72,7 @@ function decisionReasonToString(
   }
   switch (decisionReason.type) {
     case 'rule':
-      return `Rule: ${permissionRuleValueToString(decisionReason.rule.ruleValue)}`
+      return `Rule: ${permissionRuleValueToString(decisionReason.rule?.ruleValue)}`
     case 'mode':
       return `Mode: ${decisionReason.mode}`
     case 'subcommandResults':

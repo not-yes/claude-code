@@ -155,10 +155,10 @@ export function createPermissionRequestMessage(
       }
       case 'rule': {
         const ruleString = permissionRuleValueToString(
-          decisionReason.rule.ruleValue,
+          decisionReason.rule?.ruleValue,
         )
         const sourceString = permissionRuleSourceDisplayString(
-          decisionReason.rule.source,
+          decisionReason.rule?.source,
         )
         return `Permission rule '${ruleString}' from ${sourceString} requires approval for this ${toolName} command`
       }
@@ -1136,7 +1136,7 @@ export async function checkRuleBasedPermissions(
   if (
     toolPermissionResult?.behavior === 'ask' &&
     toolPermissionResult.decisionReason?.type === 'rule' &&
-    toolPermissionResult.decisionReason.rule.ruleBehavior === 'ask'
+    toolPermissionResult.decisionReason.rule?.ruleBehavior === 'ask'
   ) {
     return toolPermissionResult
   }
@@ -1244,7 +1244,7 @@ async function hasPermissionsToUseToolInner(
   if (
     toolPermissionResult?.behavior === 'ask' &&
     toolPermissionResult.decisionReason?.type === 'rule' &&
-    toolPermissionResult.decisionReason.rule.ruleBehavior === 'ask'
+    toolPermissionResult.decisionReason.rule?.ruleBehavior === 'ask'
   ) {
     return toolPermissionResult
   }

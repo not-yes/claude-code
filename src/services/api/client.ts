@@ -120,6 +120,24 @@ export async function getAnthropicClient({
     `[API:request] Creating client, ANTHROPIC_CUSTOM_HEADERS present: ${!!process.env.ANTHROPIC_CUSTOM_HEADERS}, has Authorization header: ${!!customHeaders['Authorization']}`,
   )
 
+  // [DIAG] 记录客户端创建时的认证和路由信息
+  {
+    const diagApiKey = process.env.ANTHROPIC_API_KEY
+    const diagAuthToken = process.env.ANTHROPIC_AUTH_TOKEN
+    const diagBaseURL = process.env.ANTHROPIC_BASE_URL
+    const diagModel = model ?? '未指定'
+    const diagIsSubscriber = isClaudeAISubscriber()
+    process.stderr.write(
+      `[${new Date().toISOString()}] [INFO] [client] [DIAG] getAnthropicClient: ` +
+      `apiKey=${diagApiKey ? '有(' + diagApiKey.slice(0, 6) + '...)' : '无'} ` +
+      `authToken=${diagAuthToken ? '有(' + diagAuthToken.slice(0, 6) + '...)' : '无'} ` +
+      `baseURL=${diagBaseURL || '默认'} ` +
+      `model=${diagModel} ` +
+      `isClaudeAISubscriber=${diagIsSubscriber} ` +
+      `source=${source ?? 'unknown'}\n`
+    )
+  }
+
   // Add additional protection header if enabled via env var
   const additionalProtectionEnabled = isEnvTruthy(
     process.env.CLAUDE_CODE_ADDITIONAL_PROTECTION,
@@ -135,6 +153,11 @@ export async function getAnthropicClient({
   if (!isClaudeAISubscriber()) {
     await configureApiKeyHeaders(defaultHeaders, getIsNonInteractiveSession())
   }
+
+  // Log auth configuration AFTER configureApiKeyHeaders (ANTHROPIC_AUTH_TOKEN is set into defaultHeaders, not customHeaders)
+  logForDebugging(
+    `[API:auth] Auth configured: isClaudeAISubscriber=${isClaudeAISubscriber()}, hasAuthorizationHeader=${!!defaultHeaders['Authorization']}, baseURL=${process.env.ANTHROPIC_BASE_URL ?? 'default'}, model=${model ?? 'default'}, timeout=${parseInt(process.env.API_TIMEOUT_MS || String(600 * 1000), 10)}ms`,
+  )
 
   const resolvedFetch = buildFetch(fetchOverride, source)
 
@@ -159,14 +182,14 @@ export async function getAnthropicClient({
         ? process.env.ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION
         : getAWSRegion()
 
-    const bedrockArgs: ConstructorParameters<typeof AnthropicBedrock>[0] = {
+    const bedrockArgs = {
       ...ARGS,
       awsRegion,
       ...(isEnvTruthy(process.env.CLAUDE_CODE_SKIP_BEDROCK_AUTH) && {
         skipAuth: true,
       }),
       ...(isDebugToStdErr() && { logger: createStderrLogger() }),
-    }
+    } as ConstructorParameters<typeof AnthropicBedrock>[0]
 
     // Add API key authentication if available
     if (process.env.AWS_BEARER_TOKEN_BEDROCK) {
@@ -180,9 +203,9 @@ export async function getAnthropicClient({
       // Refresh auth and get credentials with cache clearing
       const cachedCredentials = await refreshAndGetAwsCredentials()
       if (cachedCredentials) {
-        bedrockArgs.awsAccessKey = cachedCredentials.accessKeyId
-        bedrockArgs.awsSecretKey = cachedCredentials.secretAccessKey
-        bedrockArgs.awsSessionToken = cachedCredentials.sessionToken
+        (bedrockArgs as any).awsAccessKey = cachedCredentials.accessKeyId
+        ;(bedrockArgs as any).awsSecretKey = cachedCredentials.secretAccessKey
+        ;(bedrockArgs as any).awsSessionToken = cachedCredentials.sessionToken
       }
     }
     // we have always been lying about the return type - this doesn't support batching or models
@@ -287,12 +310,12 @@ export async function getAnthropicClient({
               }),
         })
 
-    const vertexArgs: ConstructorParameters<typeof AnthropicVertex>[0] = {
+    const vertexArgs = {
       ...ARGS,
       region: getVertexRegionForModel(model),
       googleAuth,
       ...(isDebugToStdErr() && { logger: createStderrLogger() }),
-    }
+    } as unknown as ConstructorParameters<typeof AnthropicVertex>[0]
     // we have always been lying about the return type - this doesn't support batching or models
     return new AnthropicVertex(vertexArgs) as unknown as Anthropic
   }
@@ -311,6 +334,14 @@ export async function getAnthropicClient({
     ...ARGS,
     ...(isDebugToStdErr() && { logger: createStderrLogger() }),
   }
+
+  // [DIAG] 最终 Anthropic 客户端配置
+  process.stderr.write(
+    `[${new Date().toISOString()}] [INFO] [client] [DIAG] 创建 Anthropic 客户端: ` +
+    `hasApiKey=${!!(clientConfig as any).apiKey} ` +
+    `hasAuthToken=${!!(clientConfig as any).authToken} ` +
+    `baseURL=${(clientConfig as any).baseURL || process.env.ANTHROPIC_BASE_URL || '默认'}\n`
+  )
 
   return new Anthropic(clientConfig)
 }
@@ -359,14 +390,14 @@ function buildFetch(
   fetchOverride: ClientOptions['fetch'],
   source: string | undefined,
 ): ClientOptions['fetch'] {
-  // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+  // eslint-disable-next-line n/no-unsupported-features/node-builtins
   const inner = fetchOverride ?? globalThis.fetch
   // Only send to the first-party API — Bedrock/Vertex/Foundry don't log it
   // and unknown headers risk rejection by strict proxies (inc-4029 class).
   const injectClientRequestId =
     getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
   return (input, init) => {
-    // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+    // eslint-disable-next-line n/no-unsupported-features/node-builtins
     const headers = new Headers(init?.headers)
     // Generate a client-side request ID so timeouts (which return no server
     // request ID) can still be correlated with server logs by the API team.
@@ -375,7 +406,7 @@ function buildFetch(
       headers.set(CLIENT_REQUEST_ID_HEADER, randomUUID())
     }
     try {
-      // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
+      // eslint-disable-next-line n/no-unsupported-features/node-builtins
       const url = input instanceof Request ? input.url : String(input)
       const id = headers.get(CLIENT_REQUEST_ID_HEADER)
       logForDebugging(

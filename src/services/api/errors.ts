@@ -108,7 +108,7 @@ export function getPromptTooLongTokenGap(
     return undefined
   }
   const { actualTokens, limitTokens } = parsePromptTooLongTokenCounts(
-    msg.errorDetails,
+    msg.errorDetails as string,
   )
   if (actualTokens === undefined || limitTokens === undefined) {
     return undefined
@@ -148,7 +148,7 @@ export function isMediaSizeErrorMessage(msg: AssistantMessage): boolean {
   return (
     msg.isApiErrorMessage === true &&
     msg.errorDetails !== undefined &&
-    isMediaSizeError(msg.errorDetails)
+    isMediaSizeError(msg.errorDetails as string)
   )
 }
 export const CREDIT_BALANCE_TOO_LOW_ERROR_MESSAGE = 'Credit balance is too low'
@@ -337,8 +337,8 @@ function logToolUseToolResultMismatch(
           break
         }
         case 'attachment':
-          if ('attachment' in msg) {
-            preNormalizedSeq.push(`attachment:${msg.attachment.type}`)
+          if ('attachment' in msg && msg.attachment) {
+            preNormalizedSeq.push(`attachment:${(msg.attachment as { type: string }).type}`)
           }
           break
         case 'system':
@@ -376,7 +376,7 @@ function logToolUseToolResultMismatch(
       normalizedToolUseIndex: normalizedIndex,
       originalToolUseIndex: originalIndex,
     })
-  } catch (_) {
+  } catch {
     // Ignore errors in debug logging
   }
 }

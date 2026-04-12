@@ -73,6 +73,28 @@ export interface HistoryEntry {
 
 export type ReleaseChannel = 'stable' | 'latest'
 
+/** 单条会话成本记录，用于历史趋势统计 */
+export type SessionCostRecord = {
+  sessionId: string
+  timestamp: number          // 会话结束/保存时的 epoch ms
+  date: string               // "2026-04-11" 用于按日分组
+  week: string               // "2026-W15" 用于按周分组
+  month: string              // "2026-04" 用于按月分组
+  costUSD: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  linesAdded: number
+  linesRemoved: number
+  durationMs: number         // 会话持续时长
+  modelUsage: Record<string, {
+    inputTokens: number
+    outputTokens: number
+    costUSD: number
+  }>
+}
+
 export type ProjectConfig = {
   allowedTools: string[]
   mcpContextUris: string[]
@@ -133,6 +155,8 @@ export type ProjectConfig = {
   }
   /** Spawn mode for `claude remote-control` multi-session. Set by first-run dialog or `w` toggle. */
   remoteControlSpawnMode?: 'same-dir' | 'worktree'
+  /** 历史成本记录，保留最近 90 天 */
+  costHistory?: SessionCostRecord[]
 }
 
 const DEFAULT_PROJECT_CONFIG: ProjectConfig = {
