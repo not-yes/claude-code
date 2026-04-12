@@ -42,6 +42,7 @@ export type SidecarStreamEvent =
       toolName: string
       result: unknown
       isError?: boolean
+      filePath?: string      // 新增：工具创建/修改的文件路径
     }
   | {
       /** 需要用户授权的权限请求（仅 interactive 模式） */
@@ -142,6 +143,10 @@ export interface PermissionDecision {
     action: string
     reason?: string
   }
+  /** AskUserQuestion 工具收集的用户答案（question text → answer string） */
+  answers?: Record<string, string>
+  /** ExitPlanMode 等工具的更新输入（如编辑后的 plan） */
+  updatedInput?: Record<string, unknown>
 }
 
 // ─── 权限模式 ──────────────────────────────────────────────────────────────────

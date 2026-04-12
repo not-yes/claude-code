@@ -347,6 +347,16 @@ class AgentCoreImpl implements AgentCore {
     this.isInitialized = false
     this.queryEngineModule = null
     this.activeSessionId = null
+
+    // 清空大型数据结构，释放内存
+    const historyLen = this.messageHistory.length
+    const mcpLen = this.mcpClients.length
+    this.messageHistory = []
+    this.mcpClients = []
+    this.log('info', 'AgentCore shutdown: 内存清理完成', {
+      clearedMessageHistory: historyLen,
+      clearedMcpClients: mcpLen,
+    })
   }
 
   // ─── 核心执行 ──────────────────────────────────────────────────────────
@@ -359,15 +369,48 @@ class AgentCoreImpl implements AgentCore {
       throw new Error('AgentCore 尚未初始化，请先调用 initialize()')
     }
 
+    process.stderr.write(`[AgentCore] execute 开始, agentId=${options?.agentId ?? 'main'}\n`)
+    this.log('info', 'execute() 开始', {
+      contentLength: content.length,
+      agentId: options?.agentId,
+      model: options?.model,
+      permissionMode: options?.permissionMode,
+      requestId: options?.requestId,
+    })
+
     // 创建新的 AbortController（每次执行独立）
     this.abortController = new AbortController()
 
-    // 如果指定了 agentId，加载 agent 的 skills 并 prepend 到消息
-    if (options?.agentId) {
-      const skillContent = await this.loadAgentSkills(options.agentId)
+    try {
+    // 如果指定了 agentId，加载 agent 的 soul（系统提示）和 skills
+    if (options?.agentId && options.agentId !== 'main') {
+      const agentId = options.agentId
+      // 若前端已传入 systemPrompt，直接使用；否则自动加载 agent soul
+      if (options.systemPrompt) {
+        process.stderr.write(
+          `[AgentCore] soul 已由前端传入: agentId=${agentId} soul长度=${options.systemPrompt.length}\n`
+        )
+      } else {
+        const soul = await this.loadAgentSoul(agentId)
+        process.stderr.write(`[AgentCore] loadAgentSoul 完成, agentId=${agentId}, 有soul=${!!soul}\n`)
+        if (soul) {
+          options = { ...options, systemPrompt: soul }
+          process.stderr.write(
+            `[AgentCore] 自动注入 agent soul: agentId=${agentId} soul前100="${soul.slice(0, 100)}"\n`
+          )
+        } else {
+          process.stderr.write(
+            `[AgentCore] 未找到 soul，将使用默认系统提示: agentId=${agentId}\n`
+          )
+        }
+      }
+      const skillContent = await this.loadAgentSkills(agentId)
+      process.stderr.write(`[AgentCore] loadAgentSkills 完成, agentId=${agentId}, 有skillContent=${!!skillContent}\n`)
       if (skillContent) {
         content = `${skillContent}\n\n用户请求: ${content}`
       }
+    } else {
+      process.stderr.write(`[AgentCore] 无 agentId 或 agentId='main'，跳过 soul/skills 加载\n`)
     }
 
     // 持久化用户输入消息（使用 SDK 标准格式）
@@ -398,15 +441,23 @@ class AgentCoreImpl implements AgentCore {
     // 构造传给 QueryEngine 的 AppState 访问器
     const { getAppState, setAppState } = stateManager.buildAppStateAccessor()
 
-    try {
+      // 设置全局 cwd 状态，确保 getProjectRoot() 和 SkillTool 等依赖全局 cwd 的函数能正确工作
+      const { setCwdState, setProjectRoot } = await import('../bootstrap/state.js')
+      setCwdState(this.config.cwd)
+      setProjectRoot(this.config.cwd)
+
       // 获取工具列表（已筛选的）
       const tools = toolRegistry.getEnabledTools(options?.allowedTools)
+
+      // 加载 slash commands（含 skills），用于 QueryEngine 系统提示中的 skill 列表
+      const { getCommands } = await import('../commands.js')
+      const commands = await getCommands(this.config.cwd)
 
       // 构造 QueryEngine 配置
       const engineConfig = {
         cwd: this.config.cwd,
         tools,
-        commands: [],
+        commands,
         mcpClients: this.mcpClients,
         agents: [],
         canUseTool,
@@ -426,15 +477,72 @@ class AgentCoreImpl implements AgentCore {
       // 使用 QueryEngine 执行查询
       const engine = new QueryEngine(engineConfig)
 
+      this.log('info', 'QueryEngine 创建完成，开始 submitMessage', {
+        toolCount: tools.length,
+        historyMessages: this.messageHistory.length,
+        cwd: this.config.cwd,
+        model: options?.model ?? 'default',
+      })
+      process.stderr.write(`[AgentCore] 开始 submitMessage, toolCount=${tools.length}, historyMessages=${this.messageHistory.length}\n`)
+
       // 迭代 SDK 消息，转换为 SidecarStreamEvent
       let assistantTextBuffer = ''
       let lastStopReason = 'end_turn'
       // 收集 result 消息中的统计数据
       let executionUsage: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number } | null = null
       let executionCostUsd = 0
+      let sdkMsgCount = 0
+      let assistantMsgCount = 0
+      let yieldedEventCount = 0
+
+      this.log('info', '[DIAG] 开始迭代 engine.submitMessage()', {
+        contentPreview: content.slice(0, 50),
+        historyMessages: this.messageHistory.length,
+      })
+
       for await (const sdkMsg of engine.submitMessage(content, {
         uuid: options?.requestId,
       })) {
+        sdkMsgCount++
+        const msgType = (sdkMsg as any).type as string
+
+        // 收到第一条 SDK 事件时输出 stderr 日志
+        if (sdkMsgCount === 1) {
+          process.stderr.write(`[AgentCore] 收到第一个 SDK 事件 type=${msgType}\n`)
+        }
+
+        // 诊断：记录每条 sdkMsg 的类型
+        const hasUsage = !!(sdkMsg as any).usage
+        const usageInfo = hasUsage ? JSON.stringify((sdkMsg as any).usage) : 'none'
+        this.log('info', `[DIAG] sdkMsg #${sdkMsgCount} type=${msgType} hasUsage=${hasUsage}${hasUsage ? ` usage=${usageInfo}` : ''}`)
+
+        // 对 assistant 消息额外记录 content blocks 信息
+        if (msgType === 'assistant') {
+          assistantMsgCount++
+          const content = (sdkMsg as any).message?.content
+          if (Array.isArray(content)) {
+            const blockSummary = content.map((b: any) => {
+              if (b.type === 'text') return `text(len=${b.text?.length ?? 0})`
+              if (b.type === 'thinking') return `thinking(len=${b.thinking?.length ?? 0})`
+              if (b.type === 'tool_use') return `tool_use(name=${b.name})`
+              return b.type
+            }).join(', ')
+            this.log('info', `[DIAG]   assistant #${assistantMsgCount} blocks: [${blockSummary}]`)
+          } else {
+            this.log('warn', `[DIAG]   assistant message content is NOT an array: ${typeof content}`)
+          }
+        }
+
+        // 对 result 消息额外记录详情
+        if (msgType === 'result') {
+          const stopReason = (sdkMsg as any).stop_reason
+          const subtype = (sdkMsg as any).subtype
+          this.log('info', `[DIAG]   result stop_reason=${stopReason} subtype=${subtype} hasUsage=${hasUsage}`)
+          if (!hasUsage) {
+            this.log('warn', '[DIAG]   ⚠ result 消息无 usage 数据 —— 这可能导致 inputTokens=0/outputTokens=0')
+          }
+        }
+
         // 捕获 result 消息中的 usage 和 cost 数据
         if (sdkMsg.type === 'result') {
           lastStopReason = (sdkMsg as any).stop_reason ?? lastStopReason
@@ -449,6 +557,7 @@ class AgentCoreImpl implements AgentCore {
         const events = this.mapSDKMessageToStreamEvent(sdkMsg)
         for (const event of events) {
           if (event) {
+            yieldedEventCount++
             // 累积 assistant 文本用于持久化
             if (event.type === 'text' && !event.isThinking) {
               assistantTextBuffer += event.content
@@ -457,6 +566,16 @@ class AgentCoreImpl implements AgentCore {
           }
         }
       }
+
+      this.log('info', `[DIAG] submitMessage 迭代完成`, {
+        sdkMsgCount,
+        assistantMsgCount,
+        yieldedEventCount,
+        assistantTextLen: assistantTextBuffer.length,
+        lastStopReason,
+        hasExecutionUsage: !!executionUsage,
+        executionUsage: executionUsage ?? 'null',
+      })
 
       // 将本次执行的统计数据同步到 StateManager
       if (executionUsage || executionCostUsd > 0) {
@@ -493,6 +612,11 @@ class AgentCoreImpl implements AgentCore {
 
       // 发出完成事件
       const currentState = stateManager.getState()
+      this.log('info', 'execute() 完成', {
+        stopReason: lastStopReason,
+        inputTokens: currentState.usage.inputTokens,
+        outputTokens: currentState.usage.outputTokens,
+      })
       yield {
         type: 'complete',
         reason: lastStopReason,
@@ -504,10 +628,18 @@ class AgentCoreImpl implements AgentCore {
         },
       }
     } catch (error) {
-      this.log('error', 'Execute failed', { error: error instanceof Error ? error.message : String(error) })
+      const errMsg = error instanceof Error ? error.message : String(error)
+      const errStack = error instanceof Error ? (error.stack ?? '') : ''
+      process.stderr.write(`[AgentCore] execute 异常: ${errMsg}\nstack: ${errStack}\n`)
+      this.log('error', 'Execute failed', { error: errMsg })
+      // 区分 abort 错误和真实错误，方便诊断
+      const isAbort = error instanceof Error && (error.name === 'AbortError' || errMsg.includes('aborted') || errMsg.includes('abort'))
+      if (isAbort) {
+        this.log('warn', 'execute() 被 abort 中止', { message: errMsg })
+      }
       yield {
         type: 'error',
-        message: error instanceof Error ? error.message : String(error),
+        message: errMsg,
       }
     } finally {
       this.abortController = null
@@ -725,6 +857,52 @@ class AgentCoreImpl implements AgentCore {
    * 读取 ~/.claude/agents/{agentId}.json 获取 skill 列表，
    * 然后读取 ~/.claude/skills/{skillName}/SKILL.md 获取内容
    */
+  /**
+   * 加载 Agent 的 soul（系统提示）。
+   * 支持两种格式：
+   * - Markdown 格式（~/.claude/agents/{agentId}.md）：frontmatter 之后的 body 就是 soul
+   * - JSON 格式（~/.claude/agents/{agentId}.json）：soul 字段
+   */
+  private async loadAgentSoul(agentId: string): Promise<string> {
+    const agentsDir = join(homedir(), '.claude', 'agents')
+    // 优先读取 Markdown 格式
+    try {
+      const mdPath = join(agentsDir, `${agentId}.md`)
+      process.stderr.write(`[AgentCore.loadAgentSoul] 尝试读取 MD 文件: ${mdPath}\n`)
+      const raw = await fs.readFile(mdPath, 'utf-8')
+      // 提取 frontmatter 之后的 body（---\n...\n---\n 后面的内容）
+      const match = raw.match(/^---[\s\S]*?---\n([\s\S]*)$/)
+      const body = match ? match[1].trim() : raw.trim()
+      if (body) {
+        process.stderr.write(`[AgentCore.loadAgentSoul] 成功加载 MD soul: agentId=${agentId} bodyLength=${body.length}\n`)
+        this.log('info', '从 MD 文件加载 agent soul', { agentId, bodyLength: body.length })
+        return body
+      }
+      process.stderr.write(`[AgentCore.loadAgentSoul] MD 文件存在但 body 为空: ${mdPath}\n`)
+    } catch (mdErr) {
+      process.stderr.write(`[AgentCore.loadAgentSoul] MD 文件读取失败: ${mdErr}\n`)
+      // .md 不存在，继续尝试 JSON
+    }
+    // 降级读取 JSON 格式
+    try {
+      const jsonPath = join(agentsDir, `${agentId}.json`)
+      process.stderr.write(`[AgentCore.loadAgentSoul] 尝试读取 JSON 文件: ${jsonPath}\n`)
+      const raw = await fs.readFile(jsonPath, 'utf-8')
+      const config = JSON.parse(raw)
+      if (typeof config.soul === 'string' && config.soul) {
+        process.stderr.write(`[AgentCore.loadAgentSoul] 成功加载 JSON soul: agentId=${agentId}\n`)
+        this.log('info', '从 JSON 文件加载 agent soul', { agentId })
+        return config.soul
+      }
+    } catch (jsonErr) {
+      process.stderr.write(`[AgentCore.loadAgentSoul] JSON 文件读取失败: ${jsonErr}\n`)
+      // JSON 也不存在
+    }
+    process.stderr.write(`[AgentCore.loadAgentSoul] 未找到 soul 文件: agentId=${agentId}\n`)
+    this.log('warn', '未找到 agent soul，将使用默认系统提示', { agentId })
+    return ''
+  }
+
   private async loadAgentSkills(agentId: string): Promise<string> {
     try {
       const agentConfigPath = join(homedir(), '.claude', 'agents', `${agentId}.json`)
@@ -1034,12 +1212,15 @@ class AgentCoreImpl implements AgentCore {
           if (block.type === 'tool_result') {
             // 通过 tool_use_id 在消息历史中查找对应的 tool_use block
             const toolName = this.findToolNameByUseId(block.tool_use_id) ?? ''
+            const toolInput = this.findToolInputByUseId(block.tool_use_id)
+            const filePath = toolInput?.file_path as string | undefined
             events.push({
               type: 'tool_result',
               id: block.tool_use_id,
               toolName,
               result: block.content,
               isError: block.is_error ?? false,
+              ...(filePath ? { filePath } : {}),
             })
           }
         }
@@ -1081,6 +1262,20 @@ class AgentCoreImpl implements AgentCore {
    * 从消息历史中通过 tool_use_id 查找对应的 tool name。
    * 从后往前搜索，提高查找近期 tool_use 的效率。
    */
+  private findToolInputByUseId(toolUseId: string): Record<string, unknown> | undefined {
+    for (let i = this.messageHistory.length - 1; i >= 0; i--) {
+      const msg = this.messageHistory[i] as any
+      const content = msg?.message?.content ?? msg?.content
+      if (!Array.isArray(content)) continue
+      for (const block of content) {
+        if (block.type === 'tool_use' && block.id === toolUseId) {
+          return block.input as Record<string, unknown> | undefined
+        }
+      }
+    }
+    return undefined
+  }
+
   private findToolNameByUseId(toolUseId: string): string | null {
     for (let i = this.messageHistory.length - 1; i >= 0; i--) {
       const msg = this.messageHistory[i] as any
