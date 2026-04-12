@@ -45,6 +45,8 @@ interface PermissionDecisionResult {
   granted: boolean
   remember?: boolean
   denyReason?: string
+  answers?: Record<string, string>
+  updatedInput?: Record<string, unknown>
 }
 
 /**
@@ -143,6 +145,8 @@ export class PermissionBridge {
       granted: result.granted,
       remember: result.remember,
       denyReason: result.denyReason,
+      answers: result.answers,           // 新增
+      updatedInput: result.updatedInput, // 新增
       decisionReason: result.granted
         ? { type: 'user', action: 'approved' }
         : { type: 'user', action: 'denied', reason: result.denyReason ?? 'User denied' },

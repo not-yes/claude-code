@@ -19,6 +19,7 @@ import { promises as fs } from 'fs'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { homedir } from 'os'
+import { parseCronExpression, computeNextCronRun } from '../../utils/cron.js'
 
 // ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ interface AgentCoreLike {
 interface ServerLike {
   registerMethod(name: string, handler: (params: any) => Promise<any>): void
   getAgentCore(): AgentCoreLike
+  sendNotification(method: string, params: unknown): Promise<void>
 }
 
 // ─── 存储路径 ─────────────────────────────────────────────────────────────────
@@ -122,7 +124,7 @@ async function ensureDir(): Promise<void> {
 /**
  * 读取任务列表
  */
-async function readJobs(): Promise<CronJobStore[]> {
+export async function readJobs(): Promise<CronJobStore[]> {
   try {
     await ensureDir()
     const content = await fs.readFile(JOBS_FILE, 'utf-8')
@@ -138,7 +140,7 @@ async function readJobs(): Promise<CronJobStore[]> {
 /**
  * 写入任务列表
  */
-async function writeJobs(jobs: CronJobStore[]): Promise<void> {
+export async function writeJobs(jobs: CronJobStore[]): Promise<void> {
   await ensureDir()
   await fs.writeFile(JOBS_FILE, JSON.stringify(jobs, null, 2), 'utf-8')
 }
@@ -167,8 +169,57 @@ async function writeHistory(history: CronHistoryEntry[]): Promise<void> {
   await fs.writeFile(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf-8')
 }
 
+function parseEveryInterval(s: string): number | null {
+  const match = s.trim().match(/^(\d+)\s*(s|sec|m|min|h|hr|d|day)s?$/i)
+  if (!match) return null
+  const val = parseInt(match[1], 10)
+  const unit = match[2].toLowerCase()
+  if (unit === 's' || unit === 'sec') return val * 1000
+  if (unit === 'm' || unit === 'min') return val * 60 * 1000
+  if (unit === 'h' || unit === 'hr') return val * 60 * 60 * 1000
+  if (unit === 'd' || unit === 'day') return val * 24 * 60 * 60 * 1000
+  return null
+}
+
+function computeNextRunAt(schedule: string, scheduleType: 'cron' | 'at' | 'every'): number | undefined {
+  if (scheduleType === 'cron') {
+    const fields = parseCronExpression(schedule)
+    if (!fields) return undefined
+    const next = computeNextCronRun(fields, new Date())
+    return next ? next.getTime() : undefined
+  }
+  if (scheduleType === 'every') {
+    const ms = parseEveryInterval(schedule)
+    return ms ? Date.now() + ms : undefined
+  }
+  if (scheduleType === 'at') {
+    const d = new Date(schedule)
+    return isNaN(d.getTime()) ? undefined : d.getTime()
+  }
+  return undefined
+}
+
+function validateSchedule(schedule: string, scheduleType: 'cron' | 'at' | 'every'): void {
+  if (scheduleType === 'cron') {
+    const fields = parseCronExpression(schedule)
+    if (!fields) {
+      throw new Error(`无效的 Cron 表达式: "${schedule}"。正确格式: "分 时 日 月 周"，例如 "10 10 * * *" 表示每天 10:10`)
+    }
+  } else if (scheduleType === 'every') {
+    const ms = parseEveryInterval(schedule)
+    if (!ms) {
+      throw new Error(`无效的间隔表达式: "${schedule}"。正确格式: 数字+单位，例如 "5m", "1h", "30s"`)
+    }
+  } else if (scheduleType === 'at') {
+    const d = new Date(schedule)
+    if (isNaN(d.getTime())) {
+      throw new Error(`无效的时间格式: "${schedule}"。正确格式: ISO 日期时间，例如 "2024-04-10 10:00"`)
+    }
+  }
+}
+
 /**
- * 将内部存储的 CronJobStore 转换为前端 DTO
+ * 将内部存储的 CronJobStore 转换为前端 DTO（时间戳从 ms 转为 s）
  */
 function toDTO(job: CronJobStore): CronJobDTO {
   return {
@@ -178,8 +229,8 @@ function toDTO(job: CronJobStore): CronJobDTO {
     schedule: job.schedule,
     enabled: job.enabled,
     instruction: job.instruction,
-    last_run: job.lastRunAt,
-    next_run: job.nextRunAt,
+    last_run: job.lastRunAt ? Math.floor(job.lastRunAt / 1000) : undefined,
+    next_run: job.nextRunAt ? Math.floor(job.nextRunAt / 1000) : undefined,
     run_count: job.run_count,
     last_result: job.last_result,
   }
@@ -218,6 +269,8 @@ async function addCronJob(params: {
   const jobs = await readJobs()
   const now = new Date().toISOString()
 
+  validateSchedule(params.schedule, params.schedule_type ?? 'cron')
+
   const job: CronJobStore = {
     id: randomUUID(),
     name: params.name,
@@ -228,6 +281,7 @@ async function addCronJob(params: {
     run_count: 0,
     createdAt: now,
     updatedAt: now,
+    nextRunAt: computeNextRunAt(params.schedule, params.schedule_type ?? 'cron'),
   }
 
   jobs.push(job)
@@ -261,13 +315,21 @@ async function updateCronJob(params: {
   const existing = jobs[idx]
   const now = new Date().toISOString()
 
+  const newSchedule = params.schedule !== undefined ? params.schedule : existing.schedule
+  const newScheduleType = params.schedule_type !== undefined ? params.schedule_type : existing.schedule_type
+
+  if (params.schedule !== undefined || params.schedule_type !== undefined) {
+    validateSchedule(newSchedule, newScheduleType)
+  }
+
   const updated: CronJobStore = {
     ...existing,
     name: params.name !== undefined ? params.name : existing.name,
-    schedule: params.schedule !== undefined ? params.schedule : existing.schedule,
-    schedule_type: params.schedule_type !== undefined ? params.schedule_type : existing.schedule_type,
+    schedule: newSchedule,
+    schedule_type: newScheduleType,
     instruction: params.instruction !== undefined ? params.instruction : existing.instruction,
     enabled: params.enabled !== undefined ? params.enabled : existing.enabled,
+    nextRunAt: computeNextRunAt(newSchedule, newScheduleType),
     updatedAt: now,
   }
 
@@ -300,6 +362,7 @@ async function deleteCronJob(params: { id: string }): Promise<void> {
 async function runCronJob(
   params: { id: string },
   agentCore: AgentCoreLike,
+  server: ServerLike,
 ): Promise<void> {
   if (!params.id) {
     throw new Error('参数 id 不能为空')
@@ -327,7 +390,7 @@ async function runCronJob(
   await writeJobs(jobs)
 
   // 异步执行（不阻塞 RPC 响应）
-  executeJobAsync(runId, params.id, jobIdx, job.instruction, agentCore, startTime).catch(() => {
+  executeJobAsync(runId, params.id, jobIdx, job.name, job.instruction, agentCore, startTime, server).catch(() => {
     // 错误已在 executeJobAsync 内部捕获并写入历史
   })
 }
@@ -339,9 +402,11 @@ async function executeJobAsync(
   runId: string,
   jobId: string,
   jobIdx: number,
+  jobName: string,
   instruction: string,
   agentCore: AgentCoreLike,
   startTime: number,
+  server: ServerLike,
 ): Promise<void> {
   const outputChunks: string[] = []
   let success = true
@@ -446,6 +511,22 @@ async function executeJobAsync(
   } catch {
     // 任务状态更新失败不影响结果
   }
+
+  // 发送 $/cron 通知到前端
+  try {
+    await server.sendNotification('$/cron', {
+      type: 'job_complete',
+      jobId,
+      jobName,
+      success,
+      output,
+      error: errorMsg,
+      duration_ms: durationMs,
+      timestamp: startTime,
+    })
+  } catch {
+    // 通知发送失败不影响任务执行结果
+  }
 }
 
 /**
@@ -481,23 +562,28 @@ async function getCronHistory(params: {
 /**
  * 注册所有 Cron 相关 RPC 方法到服务器实例。
  */
-export function registerCronHandlers(server: ServerLike): void {
+export function registerCronHandlers(
+  server: ServerLike,
+  schedulerRef?: { current?: { refreshSchedule: () => void } },
+): void {
   server.registerMethod('getCronJobs', async (_params: unknown) => {
     return getCronJobs()
   })
 
   server.registerMethod('addCronJob', async (params: unknown) => {
-    return addCronJob(params as {
+    const result = await addCronJob(params as {
       name: string
       schedule: string
       schedule_type?: 'cron' | 'at' | 'every'
       instruction: string
       enabled?: boolean
     })
+    schedulerRef?.current?.refreshSchedule()
+    return result
   })
 
   server.registerMethod('updateCronJob', async (params: unknown) => {
-    return updateCronJob(params as {
+    await updateCronJob(params as {
       id: string
       name?: string
       schedule?: string
@@ -505,14 +591,16 @@ export function registerCronHandlers(server: ServerLike): void {
       instruction?: string
       enabled?: boolean
     })
+    schedulerRef?.current?.refreshSchedule()
   })
 
   server.registerMethod('deleteCronJob', async (params: unknown) => {
-    return deleteCronJob(params as { id: string })
+    await deleteCronJob(params as { id: string })
+    schedulerRef?.current?.refreshSchedule()
   })
 
   server.registerMethod('runCronJob', async (params: unknown) => {
-    return runCronJob(params as { id: string }, server.getAgentCore())
+    return runCronJob(params as { id: string }, server.getAgentCore(), server)
   })
 
   server.registerMethod('getCronHistory', async (params: unknown) => {

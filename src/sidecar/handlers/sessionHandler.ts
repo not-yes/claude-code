@@ -13,6 +13,23 @@
  */
 
 import { z } from 'zod'
+import {
+  getTotalCost,
+  getTotalInputTokens,
+  getTotalOutputTokens,
+  getTotalCacheReadInputTokens,
+  getTotalCacheCreationInputTokens,
+  getTotalAPIDuration,
+  getTotalAPIDurationWithoutRetries,
+  getTotalLinesAdded,
+  getTotalLinesRemoved,
+  getModelUsage,
+  saveCurrentSessionCosts,
+  getCostHistory,
+  aggregateCostByMonth,
+  aggregateCostByWeek,
+} from '../../cost-tracker.js'
+import { getTotalToolDuration } from '../../bootstrap/state.js'
 import type { JsonRpcServer } from '../jsonRpcServer'
 
 // ─── 参数 Schema ───────────────────────────────────────────────────────────────
@@ -35,10 +52,19 @@ const DeleteSessionParamsSchema = z.object({
 
 // ─── 返回类型定义 ──────────────────────────────────────────────────────────────
 
+/** 前端可用的消息内容块格式 */
+type MessageContentBlock =
+  | { type: 'thinking'; content: string }
+  | { type: 'text'; content: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'tool_result'; toolId: string; toolName: string; result: unknown; isError?: boolean }
+  | { type: 'system'; level: 'info' | 'warning' | 'error'; content: string }
+
 interface SessionMessage {
   id?: string
   role: 'user' | 'assistant'
   content: string
+  contentBlocks?: MessageContentBlock[]
   created_at?: string
   [key: string]: unknown
 }
@@ -57,28 +83,36 @@ interface DeleteSessionResult {
   deleted: boolean
 }
 
+interface ModelUsageEntry {
+  inputTokens: number
+  outputTokens: number
+  cacheReadInputTokens: number
+  cacheCreationInputTokens: number
+  costUSD: number
+}
+
 interface StatsResult {
-  // 任务执行统计
-  total_calls: number
-  success_count: number
-  failure_count: number
-  success_rate: number
-  average_duration_ms: number
-  // LLM 统计
-  llm_calls: number
-  llm_tokens: number
-  llm_cost_usd: number
-  llm_avg_cost: number
-  // 工具统计
-  tool_calls: number
-  tool_success_count: number
-  tool_failure_count: number
-  tool_avg_duration_ms: number
-  tool_cost_usd: number
-  // 服务器状态
+  // LLM 成本
+  totalCostUsd: number
+  modelUsage: Record<string, ModelUsageEntry>
+  // Token 统计
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheCreationTokens: number
+  totalTokens: number
+  // 性能耗时
+  apiDurationMs: number
+  apiDurationWithoutRetriesMs: number
+  toolDurationMs: number
+  // 代码变更
+  linesAdded: number
+  linesRemoved: number
+  // 会话
   totalSessions: number
   activeSession: boolean
   uptime: number
+  // 系统
   memoryUsage: NodeJS.MemoryUsage
 }
 
@@ -159,12 +193,53 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
 
             let text = ''
             const content = inner['content']
+            let contentBlocks: MessageContentBlock[] | undefined
+
             if (Array.isArray(content)) {
-              // content 是 ContentBlock 数组，提取所有 text 块
+              // content 是 ContentBlock 数组，提取所有 text 块作为纯文本
               text = content
                 .filter((b: any) => b.type === 'text')
                 .map((b: any) => b.text ?? '')
                 .join('')
+
+              // 构建 toolUseMap，用于 tool_result 查找 toolName
+              const toolUseMap: Record<string, string> = {}
+              for (const block of content) {
+                const b = block as Record<string, unknown>
+                if (b['type'] === 'tool_use' && typeof b['id'] === 'string' && typeof b['name'] === 'string') {
+                  toolUseMap[b['id'] as string] = b['name'] as string
+                }
+              }
+
+              // 转换每个 content block 为前端格式
+              contentBlocks = content.reduce<MessageContentBlock[]>((acc, block) => {
+                const b = block as Record<string, unknown>
+                const bType = b['type'] as string
+
+                if (bType === 'thinking') {
+                  acc.push({ type: 'thinking', content: (b['thinking'] as string) ?? '' })
+                } else if (bType === 'text') {
+                  acc.push({ type: 'text', content: (b['text'] as string) ?? '' })
+                } else if (bType === 'tool_use') {
+                  acc.push({
+                    type: 'tool_use',
+                    id: (b['id'] as string) ?? '',
+                    name: (b['name'] as string) ?? '',
+                    input: (b['input'] as Record<string, unknown>) ?? {},
+                  })
+                } else if (bType === 'tool_result') {
+                  const toolId = (b['tool_use_id'] as string) ?? ''
+                  acc.push({
+                    type: 'tool_result',
+                    toolId,
+                    toolName: toolUseMap[toolId] ?? '',
+                    result: b['content'] ?? b['output'] ?? null,
+                    isError: (b['is_error'] as boolean | undefined) ?? false,
+                  })
+                }
+                // 其余类型（如 image 等）暂忽略
+                return acc
+              }, [])
             } else if (typeof content === 'string') {
               text = content
             } else {
@@ -175,6 +250,7 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
               id: (inner['uuid'] as string) ?? (msg['id'] as string | undefined),
               role,
               content: text,
+              contentBlocks,
               created_at: (msg['created_at'] as string | undefined),
             }
           }
@@ -226,35 +302,49 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
       const state = agentCore.getState()
       const uptime = Date.now() - server.startTime
 
-      // 计算 LLM 统计
-      const totalTokens = state.usage.inputTokens + state.usage.outputTokens
-      const llm_cost_usd = state.totalCostUsd
-      // 假设每次执行是一次 LLM 调用
-      const llm_calls = sessions.length > 0 ? sessions.length : 1
-      const llm_avg_cost = llm_calls > 0 ? llm_cost_usd / llm_calls : 0
+      // 从 cost-tracker 获取真实数据
+      const totalCostUsd = getTotalCost()
+      const inputTokens = getTotalInputTokens()
+      const outputTokens = getTotalOutputTokens()
+      const cacheReadTokens = getTotalCacheReadInputTokens()
+      const cacheCreationTokens = getTotalCacheCreationInputTokens()
+      const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens
+
+      // 构建精简的 modelUsage 映射
+      const rawModelUsage = getModelUsage()
+      const modelUsage: Record<string, ModelUsageEntry> = {}
+      for (const [model, usage] of Object.entries(rawModelUsage)) {
+        modelUsage[model] = {
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadInputTokens: usage.cacheReadInputTokens,
+          cacheCreationInputTokens: usage.cacheCreationInputTokens,
+          costUSD: usage.costUSD,
+        }
+      }
 
       return {
-        // 任务执行统计（暂用会话数作为调用数）
-        total_calls: sessions.length,
-        success_count: state.sessionId !== '' ? sessions.length : 0,
-        failure_count: 0,
-        success_rate: sessions.length > 0 ? 100 : 0,
-        average_duration_ms: uptime / Math.max(sessions.length, 1),
-        // LLM 统计
-        llm_calls,
-        llm_tokens: totalTokens,
-        llm_cost_usd,
-        llm_avg_cost,
-        // 工具统计（暂用默认值）
-        tool_calls: 0,
-        tool_success_count: 0,
-        tool_failure_count: 0,
-        tool_avg_duration_ms: 0,
-        tool_cost_usd: 0,
-        // 服务器状态
+        // LLM 成本
+        totalCostUsd,
+        modelUsage,
+        // Token 统计
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheCreationTokens,
+        totalTokens,
+        // 性能耗时
+        apiDurationMs: getTotalAPIDuration(),
+        apiDurationWithoutRetriesMs: getTotalAPIDurationWithoutRetries(),
+        toolDurationMs: getTotalToolDuration(),
+        // 代码变更
+        linesAdded: getTotalLinesAdded(),
+        linesRemoved: getTotalLinesRemoved(),
+        // 会话
         totalSessions: sessions.length,
         activeSession: state.sessionId !== '',
         uptime,
+        // 系统
         memoryUsage: process.memoryUsage(),
       }
     },
@@ -289,4 +379,17 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
       }
     },
   )
+
+  // ─── getCostHistory ────────────────────────────────────────────────────────
+
+  server.registerMethod('getCostHistory', async (_params: unknown) => {
+    // 先保存当前会话数据到 history（确保最新数据在内）
+    saveCurrentSessionCosts()
+
+    return {
+      history: getCostHistory(),
+      byMonth: aggregateCostByMonth(),
+      byWeek: aggregateCostByWeek(),
+    }
+  })
 }

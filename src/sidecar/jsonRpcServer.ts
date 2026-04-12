@@ -160,6 +160,8 @@ export class JsonRpcServer {
   private isRunning = false
   /** 动态方法路由表：方法名 → 处理器 */
   private methodRegistry = new Map<string, MethodHandler>()
+  /** Cron 调度器引用（启动后通过 setScheduler 注入） */
+  private schedulerRef: { current?: { refreshSchedule: () => void } } = {}
   /** 服务器启动时间（用于 uptime 计算） */
   readonly startTime = Date.now()
 
@@ -169,6 +171,9 @@ export class JsonRpcServer {
       debug: options.debug ?? false,
       permissionTimeoutMs: options.permissionTimeoutMs ?? 300_000,
     }
+
+    // 提高 stdout maxListeners，避免长任务流式事件触发 MaxListenersExceeded 警告
+    process.stdout.setMaxListeners(100)
 
     // 创建背压感知的写入函数（用于流事件）
     this.writeLine = createBackpressureWriter(process.stdout)
@@ -190,7 +195,7 @@ export class JsonRpcServer {
     // 注册扩展 handlers（会话扩展 API + Checkpoint API + Cron + Agent + Skill）
     registerSessionHandlers(this)
     registerCheckpointHandlers(this)
-    registerCronHandlers(this)
+    registerCronHandlers(this, this.schedulerRef)
     registerAgentHandlers(this, this.agentCore)
     registerSkillHandlers(this, this.agentCore)
     registerMcpHandlers(this, this.agentCore)
@@ -231,6 +236,14 @@ export class JsonRpcServer {
    */
   getAgentCore(): AgentCore {
     return this.agentCore
+  }
+
+  /**
+   * 注入 Cron 调度器引用，使 CRUD handler 可在任务变更后调用 refreshSchedule()。
+   * 在 server.start() 之后、Cron 调度器创建后调用。
+   */
+  setScheduler(scheduler: { refreshSchedule: () => void }): void {
+    this.schedulerRef.current = scheduler
   }
 
   // ─── 生命周期 ──────────────────────────────────────────────────────────────
@@ -298,6 +311,7 @@ export class JsonRpcServer {
    * 解析后分发到：RPC 请求处理 或 权限响应处理。
    */
   private handleRawLine(rawLine: string): void {
+    process.stderr.write(`[JsonRpcServer] handleRawLine: 收到行(前100字符): ${rawLine.slice(0, 100)}\n`)
     let parsed: unknown
     try {
       parsed = JSON.parse(rawLine)
@@ -444,7 +458,7 @@ export class JsonRpcServer {
         await this.sendResponse({
           jsonrpc: '2.0',
           id: reqId,
-          result,
+          result: result ?? null,  // undefined → null，确保 JSON 序列化包含 result 字段
         })
       }
     } catch (err) {
@@ -488,6 +502,10 @@ export class JsonRpcServer {
     const { randomUUID } = await import('crypto')
     const executeId = parsed.executeId ?? randomUUID()
 
+    process.stderr.write(
+      `[JsonRpcServer] handleExecute: 收到 execute 请求 reqId=${reqId} executeId=${executeId} content前50: ${content.slice(0, 50)}\n`
+    )
+
     // 立即发送 ack 响应（告知 host execute 已接受，以及 executeId）
     if (reqId !== null) {
       await this.sendResponse({
@@ -500,6 +518,7 @@ export class JsonRpcServer {
     // 异步执行流式查询（不阻塞后续 RPC 请求的处理）
     this.runExecuteStream(executeId, content, options).catch(err => {
       this.debugLog(`[${executeId}] 流执行异常:`, err)
+      process.stderr.write(`[JsonRpcServer] runExecuteStream 异常 executeId=${executeId}: ${err}\n`)
     })
   }
 
@@ -685,6 +704,18 @@ export class JsonRpcServer {
   /**
    * 异步发送 JSON-RPC 响应（带背压控制）
    */
+  /**
+   * 发送 JSON-RPC notification（无 id，服务端主动推送）
+   */
+  async sendNotification(method: string, params: unknown): Promise<void> {
+    const notification = JSON.stringify({
+      jsonrpc: '2.0',
+      method,
+      params,
+    })
+    await this.writeLine(notification)
+  }
+
   private async sendResponse(response: JsonRpcResponse): Promise<void> {
     await this.writeLine(JSON.stringify(response))
   }

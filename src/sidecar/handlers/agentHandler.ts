@@ -37,7 +37,9 @@ import {
 } from '../../tools/AgentTool/loadAgentsDir.js'
 import { getCwdState } from '../../bootstrap/state.js'
 import { logError } from '../../utils/log.js'
+import { loadMarkdownFilesForSubdir } from '../../utils/markdownConfigLoader.js'
 import type { AgentCore } from '../../core/AgentCore.js'
+import { readUnreadMessages } from '../../utils/teammateMailbox.js'
 
 // ─── 内部存储类型定义 ─────────────────────────────────────────────────────────
 
@@ -113,6 +115,9 @@ const AGENTS_CACHE_TTL = 5000 // 5秒缓存
 export function clearAgentsCache(): void {
   agentsCache = null
   agentsCacheTime = 0
+  // 同时清除底层 memoize 缓存，确保下次加载能读到磁盘最新数据
+  clearAgentDefinitionsCache()
+  loadMarkdownFilesForSubdir.cache.clear?.()
 }
 
 // ─── 前端 DTO 类型定义 ────────────────────────────────────────────────────────
@@ -242,10 +247,23 @@ function agentDefinitionToInfo(agent: AgentDefinition): AgentInfo {
  */
 async function loadAllAgents(): Promise<AgentInfo[]> {
   const cwd = getCwdState() || process.cwd()
+  logError(`[agentDiag] loadAllAgents START: cwd=${cwd}`)
 
   try {
     // 使用 CLI 的 agent 加载系统
     const result: AgentDefinitionsResult = await getAgentDefinitionsWithOverrides(cwd)
+
+    // 调试日志：记录加载结果
+    const totalCount = result.allAgents.length
+    const builtInCount = result.allAgents.filter(a => isBuiltInAgent(a)).length
+    const customCount = result.allAgents.filter(a => isCustomAgent(a)).length
+    const pluginCount = result.allAgents.filter(a => isPluginAgent(a)).length
+    logError(`[agentDiag] loadAllAgents: cwd=${cwd}, total=${totalCount}, built-in=${builtInCount}, custom=${customCount}, plugin=${pluginCount}`)
+
+    // 打印每个 definition 的 source 信息
+    for (const def of result.allAgents) {
+      logError(`[agentDiag] agent raw: name=${def.agentType}, source=${def.source}`)
+    }
 
     // 转换为 AgentInfo 数组
     const agents = result.allAgents.map(agentDefinitionToInfo)
@@ -255,6 +273,8 @@ async function loadAllAgents(): Promise<AgentInfo[]> {
       agent.sourceLabel !== 'built-in'  // 只过滤内置 agents
     )
 
+    logError(`[agentDiag] loadAllAgents: after filter=${filteredAgents.length}, names=[${filteredAgents.map(a => a.name).join(', ')}]`)
+
     // 按 name 去重（插件 < 用户 < 项目 < 管理）
     const seen = new Map<string, AgentInfo>()
     for (const agent of filteredAgents) {
@@ -262,8 +282,12 @@ async function loadAllAgents(): Promise<AgentInfo[]> {
       seen.set(agent.name, agent)
     }
 
-    return Array.from(seen.values())
+    const finalResult = Array.from(seen.values())
+    logError(`[agentDiag] loadAllAgents DONE: final count=${finalResult.length}, names=[${finalResult.map(a => a.name).join(', ')}]`)
+
+    return finalResult
   } catch (err) {
+    logError(`[agentDiag] loadAllAgents FAILED: ${err instanceof Error ? err.message : String(err)}`)
     logError(err)
     return []
   }
@@ -279,6 +303,10 @@ async function readAllAgents(): Promise<AgentInfo[]> {
   if (agentsCache && (now - agentsCacheTime) < AGENTS_CACHE_TTL) {
     return agentsCache
   }
+
+  // 缓存过期，清除底层 memoize 缓存以读取磁盘最新数据
+  clearAgentDefinitionsCache()
+  loadMarkdownFilesForSubdir.cache.clear?.()
 
   // 加载 agents
   agentsCache = await loadAllAgents()
@@ -757,5 +785,22 @@ export function registerAgentHandlers(server: ServerLike, agentCore: AgentCore):
 
   server.registerMethod('clearAgentMemory', async (params: unknown) => {
     return clearAgentMemory(params as { name: string })
+  })
+
+  server.registerMethod('getUnreadCounts', async (_params: unknown) => {
+    const agents = await readAllAgents()
+
+    const entries = await Promise.all(
+      agents.map(async (agent) => {
+        try {
+          const unread = await readUnreadMessages(agent.name)
+          return [agent.name, unread.length] as const
+        } catch {
+          return [agent.name, 0] as const
+        }
+      })
+    )
+
+    return Object.fromEntries(entries) as Record<string, number>
   })
 }

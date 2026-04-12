@@ -111,9 +111,12 @@ export class StreamHandler {
     let eventCount = 0
     let hasReceivedFirstEvent = false
 
+    process.stderr.write(`[StreamHandler] 开始处理 executeId=${executeId}\n`)
+
     // 流启动超时检测：10 秒内未收到任何事件则发送超时错误通知
     let startTimeoutHandle: ReturnType<typeof setTimeout> | null = setTimeout(async () => {
       if (!hasReceivedFirstEvent) {
+        process.stderr.write(`[StreamHandler] [${executeId}] 流启动超时（10秒内未收到任何事件）\n`)
         this.debugLog(`[${executeId}] 流启动超时，10 秒内未收到任何事件`)
         try {
           await this.sendStreamErrorNotification(
@@ -136,10 +139,27 @@ export class StreamHandler {
             clearTimeout(startTimeoutHandle)
             startTimeoutHandle = null
           }
+          process.stderr.write(`[StreamHandler] [${executeId}] 收到第一个事件 type=${event.type}\n`)
         }
 
         eventCount++
         this.debugLog(`[${executeId}] 事件 #${eventCount}:`, event.type)
+
+        // 前5个事件和每100个事件打印计数日志
+        if (eventCount <= 5 || eventCount % 100 === 0) {
+          process.stderr.write(`[StreamHandler] executeId=${executeId} 收到第 ${eventCount} 个事件 type=${event.type}\n`)
+        }
+
+        // 每 50 个事件检查一次 listener 数量
+        if (eventCount % 50 === 0 && eventCount > 0) {
+          const drainListeners = process.stdout.listenerCount('drain')
+          const errorListeners = process.stdout.listenerCount('error')
+          if (drainListeners > 3 || errorListeners > 3) {
+            process.stderr.write(
+              `[StreamHandler] [${executeId}] listener 警告: drain=${drainListeners}, error=${errorListeners}, events=${eventCount}\n`
+            )
+          }
+        }
 
         // 发送 `$/stream` notification（天然背压：await writeLine 等待 stdout drain）
         await this.sendStreamNotification(executeId, event)
@@ -153,6 +173,7 @@ export class StreamHandler {
 
       // 发送 `$/complete` notification
       await this.sendCompleteNotification(executeId)
+      process.stderr.write(`[StreamHandler] [${executeId}] 流正常完成，共 ${eventCount} 个事件\n`)
       this.debugLog(`[${executeId}] 流完成，共 ${eventCount} 个事件`)
 
       return { success: true, eventCount }
@@ -163,6 +184,7 @@ export class StreamHandler {
           ? String((err as NodeJS.ErrnoException).code)
           : undefined
 
+      process.stderr.write(`[StreamHandler] [${executeId}] 流出错: ${message} code=${code}\n`)
       this.debugLog(`[${executeId}] 流出错:`, message)
 
       // 发送 `$/streamError` notification
@@ -287,6 +309,7 @@ export class StreamHandler {
  */
 export function createBackpressureWriter(
   stream: NodeJS.WritableStream = process.stdout,
+  drainTimeoutMs: number = 30_000,
 ): (line: string) => Promise<void> {
   return (line: string): Promise<void> => {
     return new Promise<void>((resolve, reject) => {
@@ -302,16 +325,36 @@ export function createBackpressureWriter(
         resolve()
       } else {
         // 缓冲区已满，等待 drain 事件（背压控制）
-        const onDrain = () => {
+        let cleaned = false
+        let timeoutHandle: ReturnType<typeof setTimeout> | null = null
+
+        const cleanup = () => {
+          if (cleaned) return
+          cleaned = true
+          if (timeoutHandle !== null) clearTimeout(timeoutHandle)
+          stream.removeListener('drain', onDrain)
           stream.removeListener('error', onError)
+        }
+
+        const onDrain = () => {
+          cleanup()
           resolve()
         }
+
         const onError = (err: Error) => {
-          stream.removeListener('drain', onDrain)
+          cleanup()
           reject(err)
         }
+
         stream.once('drain', onDrain)
         stream.once('error', onError)
+
+        // Drain 超时保护：防止永久等待
+        timeoutHandle = setTimeout(() => {
+          cleanup()
+          process.stderr.write(`[WARN] stdout drain timeout after ${drainTimeoutMs}ms, forcing continue\n`)
+          resolve() // 强制继续，不破坏流
+        }, drainTimeoutMs)
       }
     })
   }
