@@ -86,6 +86,37 @@ Jobs live only in this Claude session — nothing is written to disk, and the jo
 
   return `Schedule a prompt to be enqueued at a future time. Use for both recurring schedules and one-shot reminders.
 
+## ⚠️ CRITICAL: Cron Expression Format
+
+You MUST use standard 5-field cron format with SPACES between fields:
+
+**Format**: "分钟 小时 日 月 星期"
+- 分钟: 0-59
+- 小时: 0-23
+- 日: 1-31
+- 月: 1-12
+- 星期: 0-6 (0=周日)
+
+**✅ CORRECT Examples**:
+- "10 10 * * *" → 每天 10:10 (注意是空格分隔，不是冒号)
+- "0 9 * * 1-5" → 工作日早上 9 点
+- "*/30 * * * *" → 每 30 分钟
+- "0 */2 * * *" → 每 2 小时整点
+- "30 8,18 * * *" → 每天 8:30 和 18:30
+
+**❌ WRONG Examples (DO NOT USE)**:
+- "10:10" → 错误！这是时间格式，不是 cron
+- "10 10" → 错误！只有 2 个字段，需要 5 个
+- "* * *" → 错误！只有 3 个字段
+
+**Natural Language → Cron Conversion Guide**:
+- "每天 10:10" / "every day at 10:10am" → "10 10 * * *"
+- "每天早上 9 点" / "every morning at 9am" → "0 9 * * *"
+- "每 5 分钟" / "every 5 minutes" → "*/5 * * * *"
+- "每小时" / "every hour" → "0 * * * *"
+- "工作日 9 点" / "weekdays at 9am" → "0 9 * * 1-5"
+- "每周一 10 点" / "every Monday at 10am" → "0 10 * * 1"
+
 Uses standard 5-field cron in the user's local timezone: minute hour day-of-month month day-of-week. "0 9 * * *" means 9am local — no timezone conversion needed.
 
 ## One-shot tasks (recurring: false)

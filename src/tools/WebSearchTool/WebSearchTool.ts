@@ -1,8 +1,9 @@
 import type {
   BetaContentBlock,
+  BetaRawMessageStreamEvent,
   BetaWebSearchTool20250305,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
-import { getAPIProvider } from 'src/utils/model/providers.js'
+import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from 'src/utils/model/providers.js'
 import type { PermissionResult } from 'src/utils/permissions/PermissionResult.js'
 import { z } from 'zod/v4'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
@@ -14,6 +15,7 @@ import { createUserMessage } from '../../utils/messages.js'
 import { getMainLoopModel, getSmallFastModel } from '../../utils/model/model.js'
 import { jsonParse, jsonStringify } from '../../utils/slowOperations.js'
 import { asSystemPrompt } from '../../utils/systemPromptType.js'
+import type { StreamEvent } from '../../types/message.js'
 import { getWebSearchPrompt, WEB_SEARCH_TOOL_NAME } from './prompt.js'
 import {
   getToolUseSummary,
@@ -21,6 +23,36 @@ import {
   renderToolUseMessage,
   renderToolUseProgressMessage,
 } from './UI.js'
+
+// ─── Stream event narrow types ──────────────────────────────────────────────
+// queryModelWithStreaming yields StreamEvent | AssistantMessage | SystemAPIErrorMessage.
+// StreamEvent is loosely typed as { type: string; [key: string]: unknown }, which
+// makes nested property access on event.event / event.message fail type checking.
+// These local interfaces capture the shapes we actually use so TypeScript can
+// narrow the union after the `type` discriminant check.
+
+interface AssistantStreamEvent {
+  type: 'assistant'
+  message: { content: BetaContentBlock[] }
+}
+
+interface ContentBlockStartStreamEvent {
+  type: 'stream_event'
+  event: BetaRawMessageStreamEvent & {
+    type: 'content_block_start'
+    content_block: BetaContentBlock & { id?: string; type: string; tool_use_id?: string; content?: unknown }
+  }
+}
+
+interface ContentBlockDeltaStreamEvent {
+  type: 'stream_event'
+  event: BetaRawMessageStreamEvent & {
+    type: 'content_block_delta'
+    delta: { type: string; partial_json?: string; text?: string }
+  }
+}
+
+type SearchStreamEvent = AssistantStreamEvent | ContentBlockStartStreamEvent | ContentBlockDeltaStreamEvent | StreamEvent
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
@@ -169,9 +201,12 @@ export const WebSearchTool = buildTool({
     const provider = getAPIProvider()
     const model = getMainLoopModel()
 
-    // Enable for firstParty
+    // Enable for firstParty — but only if the base URL is actually Anthropic's
+    // API. When ANTHROPIC_BASE_URL points to a third-party compatible endpoint
+    // (e.g. MiniMax, OpenRouter), the server-side web_search_20250305 tool is
+    // not available, so WebSearch must be disabled.
     if (provider === 'firstParty') {
-      return true
+      return isFirstPartyAnthropicBaseUrl()
     }
 
     // Enable for Vertex AI with supported models (Claude 4.0+)
@@ -296,20 +331,24 @@ export const WebSearchTool = buildTool({
     let progressCounter = 0
     const toolUseQueries = new Map() // Map of tool_use_id to query
 
-    for await (const event of queryStream) {
+    for await (const rawEvent of queryStream) {
+      const event = rawEvent as SearchStreamEvent
+
       if (event.type === 'assistant') {
-        allContentBlocks.push(...event.message.content)
+        const assistantEvent = event as AssistantStreamEvent
+        allContentBlocks.push(...assistantEvent.message.content)
         continue
       }
 
       // Track tool use ID when server_tool_use starts
       if (
         event.type === 'stream_event' &&
-        event.event?.type === 'content_block_start'
+        (event as ContentBlockStartStreamEvent).event?.type === 'content_block_start'
       ) {
-        const contentBlock = event.event.content_block
+        const startEvent = event as ContentBlockStartStreamEvent
+        const contentBlock = startEvent.event.content_block
         if (contentBlock && contentBlock.type === 'server_tool_use') {
-          currentToolUseId = contentBlock.id
+          currentToolUseId = contentBlock.id ?? null
           currentToolUseJson = ''
           // Note: The ServerToolUseBlock doesn't contain input.query
           // The actual query comes through input_json_delta events
@@ -321,9 +360,10 @@ export const WebSearchTool = buildTool({
       if (
         currentToolUseId &&
         event.type === 'stream_event' &&
-        event.event?.type === 'content_block_delta'
+        (event as ContentBlockDeltaStreamEvent).event?.type === 'content_block_delta'
       ) {
-        const delta = event.event.delta
+        const deltaEvent = event as ContentBlockDeltaStreamEvent
+        const delta = deltaEvent.event.delta
         if (delta?.type === 'input_json_delta' && delta.partial_json) {
           currentToolUseJson += delta.partial_json
 
@@ -363,9 +403,10 @@ export const WebSearchTool = buildTool({
       // Yield progress when search results come in
       if (
         event.type === 'stream_event' &&
-        event.event?.type === 'content_block_start'
+        (event as ContentBlockStartStreamEvent).event?.type === 'content_block_start'
       ) {
-        const contentBlock = event.event.content_block
+        const startEvent = event as ContentBlockStartStreamEvent
+        const contentBlock = startEvent.event.content_block
         if (contentBlock && contentBlock.type === 'web_search_tool_result') {
           // Get the actual query that was used for this search
           const toolUseId = contentBlock.tool_use_id

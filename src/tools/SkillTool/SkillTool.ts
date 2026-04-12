@@ -477,10 +477,12 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
         return {
           behavior: 'deny',
           message: `Skill execution blocked by permission rules`,
-          decisionReason: {
-            type: 'rule',
-            rule,
-          },
+          decisionReason: rule
+            ? {
+                type: 'rule',
+                rule,
+              }
+            : undefined,
         }
       }
     }
@@ -514,10 +516,12 @@ export const SkillTool: Tool<InputSchema, Output, Progress> = buildTool({
         return {
           behavior: 'allow',
           updatedInput: { skill, args },
-          decisionReason: {
-            type: 'rule',
-            rule,
-          },
+          decisionReason: rule
+            ? {
+                type: 'rule',
+                rule,
+              }
+            : undefined,
         }
       }
     }

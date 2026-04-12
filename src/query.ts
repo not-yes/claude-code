@@ -320,6 +320,10 @@ async function* queryLoop(
       turnCount,
     } = state
 
+    // [DIAG] 每次循环迭代入口日志
+    const diagTs = new Date().toISOString()
+    process.stderr.write(`[${diagTs}] [INFO] [query] [DIAG] queryLoop 迭代 turnCount=${turnCount} msgCount=${messages.length} transition=${state.transition?.reason ?? 'initial'} querySource=${querySource}\n`)
+
     // Skill discovery prefetch — per-iteration (uses findWritePivot guard
     // that returns early on non-write iterations). Discovery runs while the
     // model streams and tools execute; awaited post-tools alongside the
@@ -650,12 +654,15 @@ async function* queryLoop(
     let attemptWithFallback = true
 
     queryCheckpoint('query_api_loop_start')
+    // [DIAG] callModel 调用前记录关键参数
+    process.stderr.write(`[${new Date().toISOString()}] [INFO] [query] [DIAG] 准备 callModel: model=${currentModel} messagesForQuery=${messagesForQuery.length} hasSystemPrompt=${!!fullSystemPrompt} querySource=${querySource} agentId=${toolUseContext.agentId ?? 'none'}\n`)
     try {
       while (attemptWithFallback) {
         attemptWithFallback = false
         try {
           let streamingFallbackOccured = false
           queryCheckpoint('query_api_streaming_start')
+          let modelMsgCount = 0
           for await (const message of deps.callModel({
             messages: prependUserContext(messagesForQuery, userContext),
             systemPrompt: fullSystemPrompt,
@@ -706,6 +713,18 @@ async function* queryLoop(
               }),
             },
           })) {
+            // [DIAG] 记录每条来自 callModel 的消息类型
+            modelMsgCount++
+            const diagMsgType = (message as any).type
+            if (diagMsgType === 'assistant') {
+              const diagContent = (message as any).message?.content
+              const diagBlocks = Array.isArray(diagContent)
+                ? diagContent.map((b: any) => b.type === 'tool_use' ? `tool_use(${b.name})` : b.type).join(',')
+                : String(diagContent)
+              process.stderr.write(`[${new Date().toISOString()}] [INFO] [query] [DIAG] callModel msg #${modelMsgCount} type=${diagMsgType} blocks=[${diagBlocks}]\n`)
+            } else {
+              process.stderr.write(`[${new Date().toISOString()}] [INFO] [query] [DIAG] callModel msg #${modelMsgCount} type=${diagMsgType}\n`)
+            }
             // We won't use the tool_calls from the first attempt
             // We could.. but then we'd have to merge assistant messages
             // with different ids and double up on full the tool_results
@@ -862,6 +881,8 @@ async function* queryLoop(
             }
           }
           queryCheckpoint('query_api_streaming_end')
+          // [DIAG] 流式完成汇总
+          process.stderr.write(`[${new Date().toISOString()}] [INFO] [query] [DIAG] callModel 流完成: 共${modelMsgCount}条消息 assistantMessages=${assistantMessages.length} needsFollowUp=${needsFollowUp}\n`)
 
           // Yield deferred microcompact boundary message using actual API-reported
           // token deletion count instead of client-side estimates.
@@ -956,6 +977,11 @@ async function* queryLoop(
       logError(error)
       const errorMessage =
         error instanceof Error ? error.message : String(error)
+      // [DIAG] 捕获到 query 错误
+      process.stderr.write(`[${new Date().toISOString()}] [ERROR] [query] [DIAG] queryLoop catch(error): ${errorMessage}\n`)
+      if (error instanceof Error && error.stack) {
+        process.stderr.write(`[${new Date().toISOString()}] [ERROR] [query] [DIAG] stack: ${error.stack}\n`)
+      }
       logEvent('tengu_query_error', {
         assistantMessages: assistantMessages.length,
         toolUses: assistantMessages.flatMap(_ =>
@@ -1061,6 +1087,8 @@ async function* queryLoop(
 
     if (!needsFollowUp) {
       const lastMessage = assistantMessages.at(-1)
+      // [DIAG] 进入 !needsFollowUp 分支（无 tool_use，检查是否结束）
+      process.stderr.write(`[${new Date().toISOString()}] [INFO] [query] [DIAG] !needsFollowUp: assistantMessages=${assistantMessages.length} lastMsgType=${lastMessage?.type ?? 'none'} isApiError=${(lastMessage as any)?.isApiErrorMessage ?? false}\n`)
 
       // Prompt-too-long recovery: the streaming loop withheld the error
       // (see withheldByCollapse / withheldByReactive above). Try collapse
@@ -1260,6 +1288,8 @@ async function* queryLoop(
       // real response — hooks evaluating it create a death spiral:
       // error → hook blocking → retry → error → …
       if (lastMessage?.isApiErrorMessage) {
+        // [DIAG] lastMessage 是 API 错误，跳过 stop hooks 直接返回 completed
+        process.stderr.write(`[${new Date().toISOString()}] [WARN] [query] [DIAG] lastMessage.isApiErrorMessage=true，跳过 stopHooks，返回 completed. apiError=${(lastMessage as any).apiError ?? 'unknown'}\n`)
         void executeStopFailureHooks(lastMessage, toolUseContext)
         return { reason: 'completed' }
       }

@@ -295,8 +295,11 @@ async function initializeAgentMemorySnapshots(
 
 export const getAgentDefinitionsWithOverrides = memoize(
   async (cwd: string): Promise<AgentDefinitionsResult> => {
+    logError(`[agentDiag] getAgentDefinitionsWithOverrides START: cwd=${cwd}`)
+
     // Simple mode: skip custom agents, only return built-ins
     if (isEnvTruthy(process.env.CLAUDE_CODE_SIMPLE)) {
+      logError(`[agentDiag] getAgentDefinitionsWithOverrides: CLAUDE_CODE_SIMPLE mode, returning built-ins only`)
       const builtInAgents = getBuiltInAgents()
       return {
         activeAgents: builtInAgents,
@@ -305,7 +308,9 @@ export const getAgentDefinitionsWithOverrides = memoize(
     }
 
     try {
+      logError(`[agentDiag] getAgentDefinitionsWithOverrides: calling loadMarkdownFilesForSubdir('agents', '${cwd}')`)
       const markdownFiles = await loadMarkdownFilesForSubdir('agents', cwd)
+      logError(`[agentDiag] getAgentDefinitionsWithOverrides: markdownFiles count=${markdownFiles.length}, files=[${markdownFiles.map(f => f.filePath).join(', ')}]`)
 
       const failedFiles: Array<{ path: string; error: string }> = []
       const customAgents = markdownFiles
@@ -341,6 +346,11 @@ export const getAgentDefinitionsWithOverrides = memoize(
         })
         .filter(agent => agent !== null)
 
+      logError(`[agentDiag] getAgentDefinitionsWithOverrides: customAgents parsed count=${customAgents.length}, names=[${customAgents.map(a => a.agentType).join(', ')}]`)
+      if (failedFiles.length > 0) {
+        logError(`[agentDiag] getAgentDefinitionsWithOverrides: failedFiles count=${failedFiles.length}, paths=[${failedFiles.map(f => f.path + ':' + f.error).join(' | ')}]`)
+      }
+
       // Kick off plugin agent loading concurrently with memory snapshot init —
       // loadPluginAgents is memoized and takes no args, so it's independent.
       // Join both so neither becomes a floating promise if the other throws.
@@ -361,6 +371,8 @@ export const getAgentDefinitionsWithOverrides = memoize(
         ...pluginAgents,
         ...customAgents,
       ]
+
+      logError(`[agentDiag] getAgentDefinitionsWithOverrides: allAgentsList count=${allAgentsList.length}, builtIn=${builtInAgents.length}, plugin=${pluginAgents.length}, custom=${customAgents.length}`)
 
       const activeAgents = getActiveAgentsFromList(allAgentsList)
 

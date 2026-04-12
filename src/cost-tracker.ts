@@ -37,6 +37,7 @@ import {
   getCurrentProjectConfig,
   saveCurrentProjectConfig,
 } from './utils/config.js'
+import type { SessionCostRecord } from './utils/config.js'
 import {
   getContextWindowForModel,
   getModelMaxOutputTokens,
@@ -80,17 +81,15 @@ type StoredCostState = {
 }
 
 /**
- * Gets stored cost state from project config for a specific session.
- * Returns the cost data if the session ID matches, or undefined otherwise.
+ * Gets stored cost state from project config.
+ * Unconditionally returns the last saved cost data regardless of session ID.
  * Use this to read costs BEFORE overwriting the config with saveCurrentSessionCosts().
  */
-export function getStoredSessionCosts(
-  sessionId: string,
-): StoredCostState | undefined {
+export function getStoredSessionCosts(): StoredCostState | undefined {
   const projectConfig = getCurrentProjectConfig()
 
-  // Only return costs if this is the same session that was last saved
-  if (projectConfig.lastSessionId !== sessionId) {
+  // 无条件恢复上一个会话的累计数据（不再检查 sessionId）
+  if (projectConfig.lastCost == null && projectConfig.lastAPIDuration == null) {
     return undefined
   }
 
@@ -124,11 +123,11 @@ export function getStoredSessionCosts(
 
 /**
  * Restores cost state from project config when resuming a session.
- * Only restores if the session ID matches the last saved session.
+ * Unconditionally restores the last saved cost data regardless of session ID.
  * @returns true if cost state was restored, false otherwise
  */
-export function restoreCostStateForSession(sessionId: string): boolean {
-  const data = getStoredSessionCosts(sessionId)
+export function restoreCostStateForSession(): boolean {
+  const data = getStoredSessionCosts()
   if (!data) {
     return false
   }
@@ -136,42 +135,91 @@ export function restoreCostStateForSession(sessionId: string): boolean {
   return true
 }
 
+/** 返回 ISO 周格式字符串，如 "2026-W15" */
+function getISOWeekString(date: Date): string {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`
+}
+
 /**
  * Saves the current session's costs to project config.
  * Call this before switching sessions to avoid losing accumulated costs.
  */
 export function saveCurrentSessionCosts(fpsMetrics?: FpsMetrics): void {
-  saveCurrentProjectConfig(current => ({
-    ...current,
-    lastCost: getTotalCostUSD(),
-    lastAPIDuration: getTotalAPIDuration(),
-    lastAPIDurationWithoutRetries: getTotalAPIDurationWithoutRetries(),
-    lastToolDuration: getTotalToolDuration(),
-    lastDuration: getTotalDuration(),
-    lastLinesAdded: getTotalLinesAdded(),
-    lastLinesRemoved: getTotalLinesRemoved(),
-    lastTotalInputTokens: getTotalInputTokens(),
-    lastTotalOutputTokens: getTotalOutputTokens(),
-    lastTotalCacheCreationInputTokens: getTotalCacheCreationInputTokens(),
-    lastTotalCacheReadInputTokens: getTotalCacheReadInputTokens(),
-    lastTotalWebSearchRequests: getTotalWebSearchRequests(),
-    lastFpsAverage: fpsMetrics?.averageFps,
-    lastFpsLow1Pct: fpsMetrics?.low1PctFps,
-    lastModelUsage: Object.fromEntries(
+  const now = Date.now()
+  const dateObj = new Date(now)
+  const dateStr = dateObj.toISOString().split('T')[0]
+  const monthStr = dateObj.toISOString().substring(0, 7)
+  const weekStr = getISOWeekString(dateObj)
+
+  const record: SessionCostRecord = {
+    sessionId: getSessionId(),
+    timestamp: now,
+    date: dateStr,
+    week: weekStr,
+    month: monthStr,
+    costUSD: getTotalCostUSD(),
+    inputTokens: getTotalInputTokens(),
+    outputTokens: getTotalOutputTokens(),
+    cacheReadTokens: getTotalCacheReadInputTokens(),
+    cacheCreationTokens: getTotalCacheCreationInputTokens(),
+    linesAdded: getTotalLinesAdded(),
+    linesRemoved: getTotalLinesRemoved(),
+    durationMs: getTotalDuration(),
+    modelUsage: Object.fromEntries(
       Object.entries(getModelUsage()).map(([model, usage]) => [
         model,
         {
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          cacheReadInputTokens: usage.cacheReadInputTokens,
-          cacheCreationInputTokens: usage.cacheCreationInputTokens,
-          webSearchRequests: usage.webSearchRequests,
-          costUSD: usage.costUSD,
+          inputTokens: usage.inputTokens ?? 0,
+          outputTokens: usage.outputTokens ?? 0,
+          costUSD: usage.costUSD ?? 0,
         },
-      ]),
+      ])
     ),
-    lastSessionId: getSessionId(),
-  }))
+  }
+
+  saveCurrentProjectConfig(current => {
+    // 保留最近 90 天的历史
+    const cutoff = now - 90 * 24 * 3600 * 1000
+    const history = (current.costHistory ?? []).filter(r => r.timestamp > cutoff)
+
+    return {
+      ...current,
+      lastCost: getTotalCostUSD(),
+      lastAPIDuration: getTotalAPIDuration(),
+      lastAPIDurationWithoutRetries: getTotalAPIDurationWithoutRetries(),
+      lastToolDuration: getTotalToolDuration(),
+      lastDuration: getTotalDuration(),
+      lastLinesAdded: getTotalLinesAdded(),
+      lastLinesRemoved: getTotalLinesRemoved(),
+      lastTotalInputTokens: getTotalInputTokens(),
+      lastTotalOutputTokens: getTotalOutputTokens(),
+      lastTotalCacheCreationInputTokens: getTotalCacheCreationInputTokens(),
+      lastTotalCacheReadInputTokens: getTotalCacheReadInputTokens(),
+      lastTotalWebSearchRequests: getTotalWebSearchRequests(),
+      lastFpsAverage: fpsMetrics?.averageFps,
+      lastFpsLow1Pct: fpsMetrics?.low1PctFps,
+      lastModelUsage: Object.fromEntries(
+        Object.entries(getModelUsage()).map(([model, usage]) => [
+          model,
+          {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadInputTokens: usage.cacheReadInputTokens,
+            cacheCreationInputTokens: usage.cacheCreationInputTokens,
+            webSearchRequests: usage.webSearchRequests,
+            costUSD: usage.costUSD,
+          },
+        ]),
+      ),
+      lastSessionId: getSessionId(),
+      costHistory: [...history, record],
+    }
+  })
 }
 
 function formatCost(cost: number, maxDecimalPlaces: number = 4): string {
@@ -320,4 +368,52 @@ export function addToTotalSessionCost(
     )
   }
   return totalCost
+}
+
+/** 获取所有历史成本记录（最近 90 天） */
+export function getCostHistory(): SessionCostRecord[] {
+  const config = getCurrentProjectConfig()
+  return config.costHistory ?? []
+}
+
+/** 按月聚合成本统计 */
+export function aggregateCostByMonth(): Record<string, {
+  costUSD: number
+  inputTokens: number
+  outputTokens: number
+  sessions: number
+}> {
+  const history = getCostHistory()
+  const result: Record<string, { costUSD: number; inputTokens: number; outputTokens: number; sessions: number }> = {}
+  for (const record of history) {
+    if (!result[record.month]) {
+      result[record.month] = { costUSD: 0, inputTokens: 0, outputTokens: 0, sessions: 0 }
+    }
+    result[record.month].costUSD += record.costUSD
+    result[record.month].inputTokens += record.inputTokens
+    result[record.month].outputTokens += record.outputTokens
+    result[record.month].sessions += 1
+  }
+  return result
+}
+
+/** 按周聚合成本统计 */
+export function aggregateCostByWeek(): Record<string, {
+  costUSD: number
+  inputTokens: number
+  outputTokens: number
+  sessions: number
+}> {
+  const history = getCostHistory()
+  const result: Record<string, { costUSD: number; inputTokens: number; outputTokens: number; sessions: number }> = {}
+  for (const record of history) {
+    if (!result[record.week]) {
+      result[record.week] = { costUSD: 0, inputTokens: 0, outputTokens: 0, sessions: 0 }
+    }
+    result[record.week].costUSD += record.costUSD
+    result[record.week].inputTokens += record.inputTokens
+    result[record.week].outputTokens += record.outputTokens
+    result[record.week].sessions += 1
+  }
+  return result
 }
