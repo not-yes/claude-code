@@ -6,6 +6,9 @@
   "description": "Use Claude, Anthropic's AI assistant, right from your terminal. Claude can understand your codebase, edit files, run terminal commands, and handle entire workflows for you.",
   "author": "wangke",
   "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/your-username/claude-desktop/issues"
+  },
   "keywords": [
     "typescript"
   ],
@@ -101,6 +104,7 @@
     "modifiers-napi": "workspace:*",
     "p-map": "^7.0.4",
     "picomatch": "^4.0.4",
+    "playwright": "^1.59.1",
     "proper-lockfile": "^4.1.2",
     "qrcode": "^1.5.4",
     "react": "^19.2.4",

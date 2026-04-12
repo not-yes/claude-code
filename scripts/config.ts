@@ -127,4 +127,4 @@ export const banner = `#!/usr/bin/env node
 // Want to see the unminified source? We're hiring!
 // https://job-boards.greenhouse.io/anthropic/jobs/4816199008`;
 
-export const external = ['@vscode/ripgrep'];
+export const external = ['@vscode/ripgrep', 'playwright-core'];

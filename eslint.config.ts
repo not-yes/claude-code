@@ -33,8 +33,8 @@ export default tseslint.config(
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
       // Disable rule-not-found errors for eslint-plugin-n sub-rules
       // that are referenced in disable comments but not explicitly enabled
-      'eslint-plugin-n/no-unsupported-features/node-builtins': 'off',
-      'eslint-plugin-n/no-sync': 'off',
+      'n/no-unsupported-features/node-builtins': 'off',
+      'n/no-sync': 'off',
     },
   }
 );
