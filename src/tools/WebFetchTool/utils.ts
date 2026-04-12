@@ -237,7 +237,7 @@ export function isPermittedRedirect(
     const originalHostWithoutWww = stripWww(parsedOriginal.hostname)
     const redirectHostWithoutWww = stripWww(parsedRedirect.hostname)
     return originalHostWithoutWww === redirectHostWithoutWww
-  } catch (_error) {
+  } catch {
     return false
   }
 }
@@ -522,7 +522,7 @@ export async function applyPromptToMarkdown(
   const { content } = assistantMessage.message
   if (content.length > 0) {
     const contentBlock = content[0]
-    if ('text' in contentBlock!) {
+    if (typeof contentBlock === 'object' && 'text' in contentBlock) {
       return contentBlock.text
     }
   }

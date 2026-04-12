@@ -530,6 +530,12 @@ export function getCwdState(): string {
 
 export function setCwdState(cwd: string): void {
   STATE.cwd = cwd.normalize('NFC')
+  // 同步进程的实际工作目录，确保文件操作使用正确的 cwd
+  try {
+    process.chdir(cwd)
+  } catch {
+    // 目录不存在或无权限时仅记录警告，不阻断执行
+  }
 }
 
 export function getDirectConnectServerUrl(): string | undefined {
