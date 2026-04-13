@@ -37,6 +37,7 @@ import {
 } from '../../tools/AgentTool/loadAgentsDir.js'
 import { getCwdState } from '../../bootstrap/state.js'
 import { logError } from '../../utils/log.js'
+import { logForDebugging } from '../../utils/debug.js'
 import { loadMarkdownFilesForSubdir } from '../../utils/markdownConfigLoader.js'
 import type { AgentCore } from '../../core/AgentCore.js'
 import { readUnreadMessages } from '../../utils/teammateMailbox.js'
@@ -247,7 +248,7 @@ function agentDefinitionToInfo(agent: AgentDefinition): AgentInfo {
  */
 async function loadAllAgents(): Promise<AgentInfo[]> {
   const cwd = getCwdState() || process.cwd()
-  logError(`[agentDiag] loadAllAgents START: cwd=${cwd}`)
+  logForDebugging(`[agentDiag] loadAllAgents START: cwd=${cwd}`)
 
   try {
     // 使用 CLI 的 agent 加载系统
@@ -258,22 +259,22 @@ async function loadAllAgents(): Promise<AgentInfo[]> {
     const builtInCount = result.allAgents.filter(a => isBuiltInAgent(a)).length
     const customCount = result.allAgents.filter(a => isCustomAgent(a)).length
     const pluginCount = result.allAgents.filter(a => isPluginAgent(a)).length
-    logError(`[agentDiag] loadAllAgents: cwd=${cwd}, total=${totalCount}, built-in=${builtInCount}, custom=${customCount}, plugin=${pluginCount}`)
+    logForDebugging(`[agentDiag] loadAllAgents: cwd=${cwd}, total=${totalCount}, built-in=${builtInCount}, custom=${customCount}, plugin=${pluginCount}`)
 
     // 打印每个 definition 的 source 信息
     for (const def of result.allAgents) {
-      logError(`[agentDiag] agent raw: name=${def.agentType}, source=${def.source}`)
+      logForDebugging(`[agentDiag] agent raw: name=${def.agentType}, source=${def.source}`)
     }
 
     // 转换为 AgentInfo 数组
     const agents = result.allAgents.map(agentDefinitionToInfo)
 
-    // 过滤掉内置 agents，保留插件、用户级、项目级、管理级
+    // 过滤掉内置和插件 agents，仅保留用户级、项目级、管理级
     const filteredAgents = agents.filter(agent =>
-      agent.sourceLabel !== 'built-in'  // 只过滤内置 agents
+      agent.sourceLabel !== 'built-in' && agent.sourceLabel !== 'plugin'
     )
 
-    logError(`[agentDiag] loadAllAgents: after filter=${filteredAgents.length}, names=[${filteredAgents.map(a => a.name).join(', ')}]`)
+    logForDebugging(`[agentDiag] loadAllAgents: after filter=${filteredAgents.length}, names=[${filteredAgents.map(a => a.name).join(', ')}]`)
 
     // 按 name 去重（插件 < 用户 < 项目 < 管理）
     const seen = new Map<string, AgentInfo>()
@@ -283,11 +284,11 @@ async function loadAllAgents(): Promise<AgentInfo[]> {
     }
 
     const finalResult = Array.from(seen.values())
-    logError(`[agentDiag] loadAllAgents DONE: final count=${finalResult.length}, names=[${finalResult.map(a => a.name).join(', ')}]`)
+    logForDebugging(`[agentDiag] loadAllAgents DONE: final count=${finalResult.length}, names=[${finalResult.map(a => a.name).join(', ')}]`)
 
     return finalResult
   } catch (err) {
-    logError(`[agentDiag] loadAllAgents FAILED: ${err instanceof Error ? err.message : String(err)}`)
+    logForDebugging(`[agentDiag] loadAllAgents FAILED: ${err instanceof Error ? err.message : String(err)}`)
     logError(err)
     return []
   }

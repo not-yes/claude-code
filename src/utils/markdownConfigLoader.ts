@@ -577,6 +577,22 @@ async function loadMarkdownFiles(dir: string): Promise<
           dir,
           signal,
         )
+
+    // When ripgrep returns empty results, attempt native search as supplemental
+    // verification. In compiled sidecar binaries, the embedded ripgrep path may
+    // silently fail (exit code 2 → resolves to []), causing agents/commands to
+    // appear missing even though the files exist on disk.
+    if (!useNative && files.length === 0) {
+      try {
+        const nativeFallbackSignal = AbortSignal.timeout(3000)
+        const nativeFiles = await findMarkdownFilesNative(dir, nativeFallbackSignal)
+        if (nativeFiles.length > 0) {
+          files = nativeFiles
+        }
+      } catch {
+        // native fallback failure does not affect the original result
+      }
+    }
   } catch (e: unknown) {
     // Handle missing/inaccessible dir directly instead of pre-checking
     // existence (TOCTOU). findMarkdownFilesNative already catches internally;

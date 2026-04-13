@@ -214,6 +214,16 @@ function validateConfig(agentConfig: AgentCoreConfig): ConfigValidation {
 async function main(): Promise<void> {
   log('INFO', '启动 Sidecar 进程...')
 
+  // 0. Force native file search in compiled sidecar binary.
+  //    The embedded ripgrep in bun compiled binaries does not bundle a real rg executable;
+  //    it would spawn the sidecar itself with argv0='rg', which silently fails or returns
+  //    incomplete results. Native fs search (readdir) is reliable and avoids this issue.
+  //    The Rust backend also sets this env var, but we set it here too to ensure it works
+  //    when the sidecar binary is invoked directly (e.g. during testing or debugging).
+  if (!process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH) {
+    process.env.CLAUDE_CODE_USE_NATIVE_FILE_SEARCH = 'true'
+  }
+
   // 1. 先启用配置系统（必须在读取配置之前）
   enableConfigs()
   log('INFO', '配置系统已启用')
