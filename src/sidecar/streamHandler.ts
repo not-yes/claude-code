@@ -79,6 +79,13 @@ export class StreamHandler {
   private isAborted = false
 
   /**
+   * 最近一次收到流事件的时间戳（毫秒）。
+   * 由 JsonRpcServer 读取，用于空闲超时检测。
+   * 在 handle() 开始前由外部初始化为 Date.now()。
+   */
+  public lastActivityTime: number = Date.now()
+
+  /**
    * @param writeLine 向 stdout 写入一行（带背压等待）的异步函数
    * @param options 配置选项
    */
@@ -141,6 +148,9 @@ export class StreamHandler {
           }
           process.stderr.write(`[StreamHandler] [${executeId}] 收到第一个事件 type=${event.type}\n`)
         }
+
+        // 更新最近活动时间（供外部空闲超时检测使用）
+        this.lastActivityTime = Date.now()
 
         eventCount++
         this.debugLog(`[${executeId}] 事件 #${eventCount}:`, event.type)

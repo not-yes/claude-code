@@ -67,6 +67,11 @@ const RPC_ERROR = {
   SEQUENCE_ERROR: -32002,
 } as const
 
+/** 流式执行空闲超时（毫秒）：连续 120s 无任何流事件才触发 */
+const IDLE_TIMEOUT_MS = 120_000
+/** 流式执行绝对超时（毫秒）：从开始算起的最大执行时间上限 */
+const ABSOLUTE_TIMEOUT_MS = 30 * 60 * 1_000
+
 interface JsonRpcRequest {
   jsonrpc: '2.0'
   id?: string | number | null
@@ -526,6 +531,9 @@ export class JsonRpcServer {
 
   /**
    * 异步运行流式执行，注册到注册表，完成后注销。
+   * 双层超时保护：
+   *   - 空闲超时 120s：每次 handler 产出事件时重置，连续 120s 无事件才触发
+   *   - 绝对超时 30 分钟：从开始算起的上限，防止性防护
    */
   private async runExecuteStream(
     executeId: string,
@@ -537,19 +545,81 @@ export class JsonRpcServer {
       debug: this.options.debug,
     })
 
+    // 初始化最近活动时间（在 generator 产出第一个事件之前就已设置好）
+    handler.lastActivityTime = Date.now()
+
     // 启动 generator（不 await，稍后注册）
     const generator = this.agentCore.execute(content, options)
 
     // 注册到活跃流注册表
     this.streamRegistry.register(executeId, generator, handler, this.agentCore)
 
+    let idleCheckHandle: ReturnType<typeof setInterval> | undefined
+    let absoluteTimeoutHandle: ReturnType<typeof setTimeout> | undefined
+
     try {
-      // 消费流（内部处理所有 notification 发送）
-      const result = await handler.handle(executeId, generator)
+      // 空闲超时：每 10 秒检查一次，连续 120s 无事件则触发
+      const idleTimeoutPromise = new Promise<never>((_, reject) => {
+        idleCheckHandle = setInterval(() => {
+          const elapsed = Date.now() - handler.lastActivityTime
+          if (elapsed >= IDLE_TIMEOUT_MS) {
+            reject(new Error('IDLE_TIMEOUT'))
+          }
+        }, 10_000)
+      })
+
+      // 绝对超时：30 分钟上限
+      const absoluteTimeoutPromise = new Promise<never>((_, reject) => {
+        absoluteTimeoutHandle = setTimeout(
+          () => reject(new Error('ABSOLUTE_TIMEOUT')),
+          ABSOLUTE_TIMEOUT_MS,
+        )
+      })
+
+      // 消耗流（内部处理所有 notification 发送），与双层超时竞速
+      const result = await Promise.race([
+        handler.handle(executeId, generator),
+        idleTimeoutPromise,
+        absoluteTimeoutPromise,
+      ])
       this.debugLog(
         `[${executeId}] 流执行完成: success=${result.success}, events=${result.eventCount}`,
       )
     } catch (error) {
+      const isIdleTimeout = error instanceof Error && error.message === 'IDLE_TIMEOUT'
+      const isAbsoluteTimeout = error instanceof Error && error.message === 'ABSOLUTE_TIMEOUT'
+
+      if (isIdleTimeout || isAbsoluteTimeout) {
+        // ── 超时分支 ──────────────────────────────────────────────────────────
+        const timeoutType = isIdleTimeout ? 'idle' : 'absolute'
+        const timeoutMs = isIdleTimeout ? IDLE_TIMEOUT_MS : ABSOLUTE_TIMEOUT_MS
+        process.stderr.write(
+          `[JsonRpcServer] executeStream ${timeoutType} timeout after ${timeoutMs}ms, executeId=${executeId}\n`,
+        )
+        // 中止 agentCore + generator（registry.abort 会同时 abort 两者并删除注册项）
+        await this.streamRegistry.abort(executeId)
+
+        // 通知客户端超时
+        try {
+          await this.writeLine(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              method: '$/streamError',
+              params: {
+                executeId,
+                message: `Execute stream ${timeoutType} timeout`,
+                code: `EXECUTE_${timeoutType.toUpperCase()}_TIMEOUT`,
+              },
+            }),
+          )
+        } catch (writeErr) {
+          this.debugLog(`[${executeId}] 发送超时通知失败:`, writeErr)
+        }
+        // 超时时 registry.abort 已内部删除条目，直接返回，跳过 finally 中的 unregister
+        return
+      }
+
+      // ── 其他异常分支 ───────────────────────────────────────────────────────
       // 捕获流启动或运行期间的未预期异常（handler.handle 内部通常自己处理错误，
       // 此处为双保险：防止 StreamHandler 外层抛出的错误导致客户端永远收不到结束信号）
       const errorMsg = error instanceof Error ? error.message : String(error)
@@ -572,7 +642,10 @@ export class JsonRpcServer {
         this.debugLog(`[${executeId}] 发送流启动失败通知失败:`, writeErr)
       }
     } finally {
-      // 无论成功还是失败，都要注销
+      // 清理定时器（正常完成路径）
+      if (idleCheckHandle !== undefined) clearInterval(idleCheckHandle)
+      if (absoluteTimeoutHandle !== undefined) clearTimeout(absoluteTimeoutHandle)
+      // 无论成功还是失败，都要注销（超时分支已提前 return，不会执行到此处）
       this.streamRegistry.unregister(executeId)
     }
   }
@@ -738,4 +811,3 @@ export class JsonRpcServer {
     }
   }
 }
-

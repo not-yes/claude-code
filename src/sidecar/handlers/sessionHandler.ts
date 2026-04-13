@@ -163,7 +163,7 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
         // 优先使用前端传递的 cwd，否则使用 agentCore 的 cwd
         const cwd = requestedCwd || agentCore.getState().cwd
         console.error(`[getSessions] DEBUG: cwd=${cwd}, limit=${limit}, requestedAgentId=${requestedAgentId}`)
-        
+
         const cliSessions = await listSessionsImpl({ dir: cwd, limit: limit * 2 })
         console.error(`[getSessions] DEBUG: cliSessions.length=${cliSessions.length}`)
 
@@ -185,7 +185,7 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
           }
 
           const sessionAgentId = agentName || 'main'
-          
+
           // 如果请求了特定 agent_id，只返回匹配的会话
           if (requestedAgentId && sessionAgentId !== requestedAgentId) {
             continue
@@ -213,13 +213,13 @@ export function registerSessionHandlers(server: JsonRpcServer): void {
       try {
         const sidecarSessions = await agentCore.listSessions()
         console.error(`[getSessions] DEBUG: sidecarSessions.length=${sidecarSessions.length}`)
-        
+
         for (const s of sidecarSessions) {
           if (seenIds.has(s.id)) continue
-          
+
           // 当前 sidecar 进程对应的 agent 身份（由 Rust 启动时通过 AGENT_ID 环境变量注入）
           const sessionAgentId = process.env.AGENT_ID ?? 'main'
-          
+
           // 如果请求了特定 agent_id，只返回匹配的会话
           if (requestedAgentId && sessionAgentId !== requestedAgentId) {
             continue
